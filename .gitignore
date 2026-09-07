@@ -1,0 +1,20 @@
+# ===== 敏感数据：Edge 调试 profile（含微软账号登录态，严禁上传）=====
+edge_debug_profile/
+
+# ===== 本地配置（含本机触发时间等信息）=====
+.rewards_config.json
+.workbuddy/
+
+# ===== 运行产物 =====
+rewards_daily_log.txt
+rewards_daily_done.png
+rewards_diag.png
+*.png
+logs/
+
+# ===== Python =====
+__pycache__/
+*.pyc
+
+# ===== 历史一次性/探测脚本（含本机旧路径，不入库）=====
+archive/
