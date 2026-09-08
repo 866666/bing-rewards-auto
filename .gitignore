@@ -18,3 +18,9 @@ __pycache__/
 
 # ===== 历史一次性/探测脚本（含本机旧路径，不入库）=====
 archive/
+
+# ===== 一次性网络工具 =====
+tools/add_github_hosts.bat
+# ===== GitHub 授权 token 临时文件（绝不入库）=====
+.gh_token.tmp
+tools/.gh_token.tmp

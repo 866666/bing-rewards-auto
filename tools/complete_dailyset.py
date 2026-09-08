@@ -8,14 +8,23 @@ import sys, json, time, urllib.request, urllib.parse, subprocess, os
 if hasattr(sys.stdout, "reconfigure"):
     sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 
+# --- 绕过本地 CDP 的系统代理（Clash 2718 拦截 loopback 会返回 502）---
+os.environ["NO_PROXY"] = "127.0.0.1,localhost,::1"
+os.environ["no_proxy"] = "127.0.0.1,localhost,::1"
+for _k in ("HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy"):
+    os.environ.pop(_k, None)
+
 CDP_HTTP = "http://127.0.0.1:9224"
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))  # 项目根
 PROFILE = os.path.join(BASE_DIR, "edge_debug_profile")
 EDGE_CANDIDATES = [r"C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe",
                    r"C:\Program Files\Microsoft\Edge\Application\msedge.exe"]
-EDGE_ARGS = ("--remote-debugging-port=9224 --remote-allow-origins=* "
-             "--user-data-dir=" + PROFILE + " "
-             "--no-first-run --no-default-browser-check about:blank")
+EDGE_ARG_LIST = [
+    "--remote-debugging-port=9224",
+    "--remote-allow-origins=*",
+    f"--user-data-dir={PROFILE}",
+    "--no-first-run", "--no-default-browser-check", "about:blank",
+]
 WAIT_PER_TASK = 18  # 每个任务在新 tab 停留秒数（tracking 生效）
 WAIT_SETTLE = 20    # 全部完成后等待计分到账
 
@@ -34,7 +43,7 @@ def ensure_edge(max_wait=45):
         print("  [x] msedge not found")
         return False
     try:
-        subprocess.Popen(f'"{exe}" {EDGE_ARGS}', shell=False,
+        subprocess.Popen([exe] + EDGE_ARG_LIST, shell=False,
                          creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
                          stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
                          stderr=subprocess.DEVNULL, close_fds=True)
@@ -161,17 +170,56 @@ def close_tab(tab_id):
         pass
 
 
-def find_task_anchor(ws, keyword):
-    """在 dashboard 找任务卡 <a> 并真实点击（触发 React onClick + target=_blank 新开窗口）"""
-    js = """(() => {
-      const kw = arguments[0];
+def task_marker(destination, title):
+    """从 destination 提取稳定标识用于 href 匹配（比 innerText 匹配可靠）。
+    优先取 ?q= 参数（URL 解码），回退 path/query 片段。"""
+    marker = ""
+    if destination:
+        try:
+            q = urllib.parse.parse_qs(urllib.parse.urlparse(destination).query).get("q", [""])[0]
+            if q:
+                marker = urllib.parse.unquote(q)[:30]
+        except Exception:
+            pass
+        if not marker:
+            marker = destination.split("bing.com")[-1][:30]
+    return marker or (title or "").strip()[:4]
+
+
+def find_task_anchor(ws, title, destination="", timeout=25):
+    """在 dashboard 找任务卡 <a> 并真实点击（触发 React onClick + target=_blank 新开窗口）。
+    先按 href 匹配 destination 稳定片段（更可靠），回退 innerText 匹配标题；
+    轮询等待卡片渲染（dashboard 懒加载，首次任务常见未渲染导致的 NO_ANCHOR）。"""
+    marker = task_marker(destination, title)
+    kw_title = (title or "").strip()
+    js = """(async () => {
+      const marker = arguments[0];
+      const kwTitle = arguments[1];
+      const deadline = arguments[2] * 1000;
+      const t0 = Date.now();
+      while (Date.now() - t0 < deadline) {
+        const anchors = [...document.querySelectorAll('a[target=_blank][href*="bing.com"]')];
+        let a = null;
+        if (marker) a = anchors.find(e => (e.getAttribute('href') || '').includes(marker));
+        if (!a && kwTitle) a = anchors.find(e => (e.innerText || '').includes(kwTitle.slice(0, 4)));
+        if (a) { a.click(); return 'CLICKED'; }
+        window.scrollBy(0, 500);  // 触发懒加载
+        await new Promise(r => setTimeout(r, 800));
+      }
+      return 'NO_ANCHOR:' + marker;
+    })()""".replace("arguments[2]", str(timeout))
+    r = cdp_js(ws, js, timeout=timeout + 10, await_promise=True)
+    if str(r) == "CLICKED":
+        return r
+    # 兜底：再按 innerText 完整标题试一次
+    js2 = """(() => {
+      const kwTitle = arguments[0];
       const anchors = [...document.querySelectorAll('a[target=_blank][href*="bing.com"]')];
-      const a = anchors.find(e => (e.innerText || '').includes(kw));
-      if (!a) return 'NO_ANCHOR:' + kw;
-      a.click();
-      return 'CLICKED';
-    })()""".replace("arguments[0]", json.dumps(keyword))
-    return cdp_js(ws, js, timeout=15)
+      const a = anchors.find(e => (e.innerText || '').includes(kwTitle));
+      if (!a) return 'NO_ANCHOR2';
+      a.click(); return 'CLICKED';
+    })()""".replace("arguments[0]", json.dumps(kw_title))
+    return cdp_js(ws, js2, timeout=15)
 
 
 def wait_for_new_tab(before_ids, max_wait=12):
@@ -213,7 +261,7 @@ def main():
         title = t["title"]
         print(f"\n[{i}/{len(todo)}] {title}  type={t['type']}")
         before = {x["id"] for x in list_tabs()}
-        r = find_task_anchor(ws, title[:2])  # 用标题前 2 字定位（如"洛杉矶"）
+        r = find_task_anchor(ws, title, t.get("destination", ""))  # href 优先 + 轮询等渲染
         print(f"  click: {r}")
         if str(r).startswith("NO_ANCHOR"):
             print("  ! 找不到卡片锚点，跳过")

@@ -43,6 +43,13 @@ def p(*a):
     except: pass
 
 # === 配置 ===
+# 清理本机代理环境变量（Clash 2718 会劫持 127.0.0.1 的 CDP 访问返回 502，拉浏览器的
+# 手动/计划任务两种环境下都必须直连 localhost）
+os.environ["NO_PROXY"] = "127.0.0.1,localhost,::1"
+os.environ["no_proxy"] = "127.0.0.1,localhost,::1"
+for _k in ("HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy"):
+    os.environ.pop(_k, None)
+
 CDP_HTTP = "http://127.0.0.1:9224"
 CDP_PORT = 9224
 US_NODE = "🇺🇸 美国 01 [V]"   # 切到这个节点
@@ -74,10 +81,13 @@ EDGE_CANDIDATES = [
     r"C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe",
     r"C:\Program Files\Microsoft\Edge\Application\msedge.exe",
 ]
-EDGE_ARGS = (f"--remote-debugging-port={CDP_PORT} "
-             "--remote-allow-origins=* "
-             f"--user-data-dir={os.path.join(BASE_DIR, 'edge_debug_profile')} "
-             "--no-first-run --no-default-browser-check --window-size=1200,800 about:blank")
+EDGE_ARG_LIST = [
+    f"--remote-debugging-port={CDP_PORT}",
+    "--remote-allow-origins=*",
+    f"--user-data-dir={os.path.join(BASE_DIR, 'edge_debug_profile')}",
+    "--no-first-run", "--no-default-browser-check",
+    "--window-size=1200,800", "about:blank",
+]
 
 def cdp_alive():
     try:
@@ -95,9 +105,10 @@ def ensure_edge(max_wait=45):
         p("  ❌ 找不到 msedge.exe")
         return False
     try:
-        subprocess.Popen(f'"{exe}" {EDGE_ARGS}', shell=False,
+        subprocess.Popen([exe] + EDGE_ARG_LIST, shell=False,
                          creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
-                         close_fds=True)
+                         stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                         stderr=subprocess.DEVNULL, close_fds=True)
     except Exception as e:
         p(f"  ❌ Edge 启动失败: {e}")
         return False

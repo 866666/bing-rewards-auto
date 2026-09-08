@@ -6,6 +6,12 @@ import sys, json, time, urllib.request, urllib.parse, subprocess, os
 if hasattr(sys.stdout, "reconfigure"):
     sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 
+# --- 绕过本地 CDP 的系统代理（Clash 2718 拦截 loopback 会返回 502）---
+os.environ["NO_PROXY"] = "127.0.0.1,localhost,::1"
+os.environ["no_proxy"] = "127.0.0.1,localhost,::1"
+for _k in ("HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy"):
+    os.environ.pop(_k, None)
+
 CDP_HTTP = "http://127.0.0.1:9224"
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))  # 项目根
 PROFILE = os.path.join(BASE_DIR, "edge_debug_profile")
