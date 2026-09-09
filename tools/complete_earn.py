@@ -59,6 +59,8 @@ def fetch_earn_tasks(ws):
           type: (a.type || t.type) + '',
           dest: (a.destination || t.destination) + '',
           src: src,
+          is_unlocked: (typeof t.is_unlocked === 'undefined' ? true : t.is_unlocked),
+          locked_category_criteria: (t.locked_category_criteria || a.locked_category_criteria || '') + '',
         };
       };
       const out = {points: (j.dashboard.userStatus||{}).availablePoints, tasks: []};
@@ -87,9 +89,15 @@ def do_task(ws, t, dry=False):
         return False
     print(f"    → {typ:12s} {title[:50]}")
 
-    # 不可自动类型直接跳过
+    # 不可自动类型/需其他资源直接跳过
     if typ in ("appinstall", "mobile", "app", "punchcard") or "install" in typ:
         print("      ⏭ 需安装/移动端，跳过")
+        return False
+    if "referandearn" in dest:
+        print("      ⏭ 邀请推荐类（referandearn），需朋友参与，跳过")
+        return False
+    if t.get("is_unlocked") is False or (t.get("locked_category_criteria") or "").strip():
+        print(f"      ⏭ 需 Rewards App（锁），跳过")
         return False
 
     before = {x["id"] for x in list_tabs()}

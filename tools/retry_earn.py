@@ -36,7 +36,9 @@ def fetch_tasks(ws):
       const norm = (t, src) => {
         const a = t.attributes || {};
         return {title:(t.title||t.name||'untitled')+'', complete:!!t.complete,
-                type:(a.type||t.type)+'', dest:(a.destination||t.destination)+'', src:src};
+                type:(a.type||t.type)+'', dest:(a.destination||t.destination)+'', src:src,
+                is_unlocked:(typeof t.is_unlocked==='undefined'? true : t.is_unlocked),
+                locked_category_criteria:(t.locked_category_criteria||a.locked_category_criteria||'')+''};
       };
       const out = {points:(j.dashboard.userStatus||{}).availablePoints, tasks:[]};
       const dsp=(d.dailySetPromotions||{})['"""+today+"""']||[];
@@ -56,15 +58,20 @@ def fetch_tasks(ws):
 
 
 def is_skippable(t):
-    """判断是否不可自动完成/不计分"""
+    """判断是否不可自动完成。
+    2026-09-09 修正：rnoreward=1 **不是**不计分标志——观星建议 带 rnoreward=1 但实点卡片能得分，
+    故不再据此跳过。真正不可网页完成的判据：
+      - type appinstall/mobile/punchcard : 需安装 App / 移动端
+      - dest 含 referandearn             : 邀请推荐，需朋友参与
+      - is_unlocked=False 或 locked_category_criteria=rewardsApp : 需 Rewards App（锁🔒仅限积分商城应用）
+    其余 urlreward/float/search/quiz 一律尝试"卡片实点+保留tab+轮询"，成败由轮询判定。"""
     typ = t["type"].lower()
     if typ in ("appinstall", "mobile", "app", "punchcard") or "install" in typ:
         return True, "需安装/移动端"
-    dest = t["dest"]
-    if "referandearn" in dest or "refer" in dest.lower():
+    if "referandearn" in t["dest"]:
         return True, "邀请推荐类，需朋友参与"
-    if "rnoreward=1" in dest:
-        return True, "rnoreward=1 微软侧不计分"
+    if t.get("is_unlocked") is False or (t.get("locked_category_criteria") or "").strip():
+        return True, f"需 Rewards App（{t.get('locked_category_criteria') or 'locked'}）"
     return False, ""
 
 

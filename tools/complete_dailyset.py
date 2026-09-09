@@ -188,37 +188,55 @@ def task_marker(destination, title):
 
 def find_task_anchor(ws, title, destination="", timeout=25):
     """在 dashboard 找任务卡 <a> 并真实点击（触发 React onClick + target=_blank 新开窗口）。
-    先按 href 匹配 destination 稳定片段（更可靠），回退 innerText 匹配标题；
-    轮询等待卡片渲染（dashboard 懒加载，首次任务常见未渲染导致的 NO_ANCHOR）。"""
+    匹配策略（多级，最稳优先）：
+      1) href 含 destination 的 q 参数编码串（URL 编码/大小写不敏感）—— 中文搜索词专用
+      2) href 含 destination 的 q 参数解码后的关键词（中文原样）
+      3) innerText 含标题前 4 字
+      4) innerText 含完整标题（兜底）
+    轮询等待卡片渲染（懒加载）。marker/kwTitle 直接 json.dumps 注入，避免 Runtime.evaluate
+    无 arguments 导致匹配失效（2026-09-09 实测：中文+URL 编码 href 曾全部 NO_ANCHOR）。"""
     marker = task_marker(destination, title)
     kw_title = (title or "").strip()
     js = """(async () => {
-      const marker = arguments[0];
-      const kwTitle = arguments[1];
-      const deadline = arguments[2] * 1000;
+      const marker = __MARKER__;
+      const kwTitle = __KW__;
+      const deadline = __TIMEOUT__ * 1000;
       const t0 = Date.now();
+      // href 里 q 参数是百分号编码（%e5%a6%82...），故用 encodeURIComponent 编码后再做大小写不敏感匹配
+      const encMarker = marker ? encodeURIComponent(marker).toLowerCase() : '';
+      const decMarker = marker ? marker.toLowerCase() : '';
       while (Date.now() - t0 < deadline) {
         const anchors = [...document.querySelectorAll('a[target=_blank][href*="bing.com"]')];
         let a = null;
-        if (marker) a = anchors.find(e => (e.getAttribute('href') || '').includes(marker));
+        if (marker) {
+          a = anchors.find(e => {
+            const h = (e.getAttribute('href') || '').toLowerCase();
+            return h.includes(encMarker) || h.includes(decMarker);
+          });
+        }
         if (!a && kwTitle) a = anchors.find(e => (e.innerText || '').includes(kwTitle.slice(0, 4)));
         if (a) { a.click(); return 'CLICKED'; }
         window.scrollBy(0, 500);  // 触发懒加载
         await new Promise(r => setTimeout(r, 800));
       }
       return 'NO_ANCHOR:' + marker;
-    })()""".replace("arguments[2]", str(timeout))
+    })()"""
+    js = js.replace("__MARKER__", json.dumps(marker)).replace("__KW__", json.dumps(kw_title)).replace("__TIMEOUT__", str(timeout))
     r = cdp_js(ws, js, timeout=timeout + 10, await_promise=True)
     if str(r) == "CLICKED":
         return r
-    # 兜底：再按 innerText 完整标题试一次
+    # 兜底：再按 innerText 完整标题试一次（并同时用 href 编码串再扫一轮）
     js2 = """(() => {
-      const kwTitle = arguments[0];
+      const kwTitle = __KW__;
+      const encMarker = __MARKER__ ? encodeURIComponent(__MARKER__).toLowerCase() : '';
       const anchors = [...document.querySelectorAll('a[target=_blank][href*="bing.com"]')];
-      const a = anchors.find(e => (e.innerText || '').includes(kwTitle));
+      let a = anchors.find(e => (e.innerText || '').includes(kwTitle));
+      if (!a && encMarker)
+        a = anchors.find(e => (e.getAttribute('href') || '').toLowerCase().includes(encMarker));
       if (!a) return 'NO_ANCHOR2';
       a.click(); return 'CLICKED';
-    })()""".replace("arguments[0]", json.dumps(kw_title))
+    })()"""
+    js2 = js2.replace("__KW__", json.dumps(kw_title)).replace("__MARKER__", json.dumps(marker))
     return cdp_js(ws, js2, timeout=15)
 
 
