@@ -28,16 +28,17 @@ MAX_PER_QUIZ = 6     # quiz 最多答题次数
 
 
 def main_script_running():
-    """主脚本在跑则不并发（同操作一个 Edge/9224）"""
-    import psutil
+    """主脚本在跑则不并发（同操作一个 Edge/9224）。
+    纯标准库检测：本机常驻 opencode_proxy(pythonw)=1 个，
+    pythonw 数量 >1 说明有额外脚本（如 rewards_daily）在跑。"""
     try:
-        for x in psutil.process_iter(["pid", "name", "cmdline"]):
-            cl = " ".join(x.info.get("cmdline") or [])
-            if (x.info.get("name") or "").lower() == "pythonw.exe" and "rewards_daily" in cl:
-                return True
+        import subprocess
+        out = subprocess.run(["tasklist", "/FO", "CSV", "/FI", "IMAGENAME eq pythonw.exe"],
+                             capture_output=True, text=True, encoding="gbk", errors="ignore",
+                             timeout=10).stdout
+        return out.lower().count("pythonw.exe") > 1
     except Exception:
-        pass
-    return False
+        return False
 
 
 def fetch_earn_tasks(ws):
