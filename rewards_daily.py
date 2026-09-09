@@ -29,7 +29,13 @@ r"""Microsoft Rewards 每日积分自动化（直连版，已验证）
   python rewards_daily.py --no-quiz      # 跳过 Quiz 尝试
 """
 import sys, io, json, time, random, urllib.request, urllib.parse, base64, argparse, subprocess, os
-sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8", errors="replace")
+# pythonw（无控制台）下 sys.stdout/stderr 为 None，直接包装会崩 → 先兜底到 devnull
+if sys.stdout is None:
+    sys.stdout = io.TextIOWrapper(open(os.devnull, "wb"), encoding="utf-8", errors="replace")
+else:
+    sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8", errors="replace")
+if sys.stderr is None:
+    sys.stderr = io.TextIOWrapper(open(os.devnull, "wb"), encoding="utf-8", errors="replace")
 
 # 项目根目录（脚本所在目录，支持任意位置解压运行；edge_debug_profile 需自行登录）
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
