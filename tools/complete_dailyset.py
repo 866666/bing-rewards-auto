@@ -198,20 +198,21 @@ def find_task_anchor(ws, title, destination="", timeout=25):
     marker = task_marker(destination, title)
     kw_title = (title or "").strip()
     js = """(async () => {
-      const marker = __MARKER__;
+      const marker = __MARKER__;   // 解码后的目的地搜索词
       const kwTitle = __KW__;
       const deadline = __TIMEOUT__ * 1000;
       const t0 = Date.now();
-      // href 里 q 参数是百分号编码（%e5%a6%82...），故用 encodeURIComponent 编码后再做大小写不敏感匹配
-      const encMarker = marker ? encodeURIComponent(marker).toLowerCase() : '';
+      // 卡片标题 ≠ 实际搜索词（观星建议→如何辨认仙后座）；且 q 参数编码多样(+ / %20 / %e5%a6%82)。
+      // 故对每个锚点用 URLSearchParams 取出 q 解码后，再与目的地搜索词做大小写不敏感匹配（编码无关）。
       const decMarker = marker ? marker.toLowerCase() : '';
       while (Date.now() - t0 < deadline) {
         const anchors = [...document.querySelectorAll('a[target=_blank][href*="bing.com"]')];
         let a = null;
         if (marker) {
           a = anchors.find(e => {
-            const h = (e.getAttribute('href') || '').toLowerCase();
-            return h.includes(encMarker) || h.includes(decMarker);
+            let q = '';
+            try { q = new URL(e.getAttribute('href'), location.origin).searchParams.get('q') || ''; } catch(e){}
+            return q && decMarker && q.toLowerCase().includes(decMarker);
           });
         }
         if (!a && kwTitle) a = anchors.find(e => (e.innerText || '').includes(kwTitle.slice(0, 4)));
@@ -228,11 +229,15 @@ def find_task_anchor(ws, title, destination="", timeout=25):
     # 兜底：再按 innerText 完整标题试一次（并同时用 href 编码串再扫一轮）
     js2 = """(() => {
       const kwTitle = __KW__;
-      const encMarker = __MARKER__ ? encodeURIComponent(__MARKER__).toLowerCase() : '';
+      const decMarker = __MARKER__ ? __MARKER__.toLowerCase() : '';
       const anchors = [...document.querySelectorAll('a[target=_blank][href*="bing.com"]')];
       let a = anchors.find(e => (e.innerText || '').includes(kwTitle));
-      if (!a && encMarker)
-        a = anchors.find(e => (e.getAttribute('href') || '').toLowerCase().includes(encMarker));
+      if (!a && decMarker)
+        a = anchors.find(e => {
+          let q = '';
+          try { q = new URL(e.getAttribute('href'), location.origin).searchParams.get('q') || ''; } catch(e){}
+          return q && q.toLowerCase().includes(decMarker);
+        });
       if (!a) return 'NO_ANCHOR2';
       a.click(); return 'CLICKED';
     })()"""
