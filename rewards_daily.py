@@ -488,6 +488,10 @@ def main():
         if i % 5 == 0:
             cur = get_points_and_state(ws)
             p(f"        状态: {cur}")
+            # 配额已满则提前收尾（避免剩余搜索白做）
+            if cur and str(cur.get("pcSearch", "")).startswith("30/30") and i < len(queries):
+                p(f"    ⏭ 配额已满 30/30，提前结束剩余 {len(queries)-i} 次搜索")
+                break
         if i < len(queries):
             time.sleep(random.uniform(12, 25))
 

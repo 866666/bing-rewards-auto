@@ -261,27 +261,43 @@ def main():
         title = t["title"]
         print(f"\n[{i}/{len(todo)}] {title}  type={t['type']}")
         before = {x["id"] for x in list_tabs()}
-        r = find_task_anchor(ws, title, t.get("destination", ""))  # href 优先 + 轮询等渲染
+        r = find_task_anchor(ws, title, t.get("destination", ""))
         print(f"  click: {r}")
         if str(r).startswith("NO_ANCHOR"):
             print("  ! 找不到卡片锚点，跳过")
             continue
         nws, ntab = wait_for_new_tab(before)
         if nws and ntab:
-            print(f"  new tab opened, staying {WAIT_PER_TASK}s for tracking...")
-            time.sleep(WAIT_PER_TASK)
-            nws.close()
-            close_tab(ntab)
-            print("  tab closed")
+            try:
+                tb = [x for x in list_tabs() if x["id"] == ntab][0]
+                print(f"  new tab opened: {tb.get('url', '')[:100]}")
+            except Exception:
+                pass
+            nws.close()  # 只断开 CDP 连接，保留浏览器 tab 让 tracking 跑完
+            print("  保留新 tab，回 dashboard 轮询计分（最长 90s）...")
         else:
             print("  ! 未捕获新 tab，等待补偿")
             time.sleep(WAIT_PER_TASK)
-        # 回到 dashboard tab
-        try:
-            cdp_js(ws, "1", timeout=5)
-        except Exception:
-            pass
-        cdp_nav(ws, "https://rewards.bing.com/dashboard", 10)
+        # 回 dashboard 并轮询该任务是否完成
+        cdp_nav(ws, "https://rewards.bing.com/dashboard", 8)
+        time.sleep(8)
+        done = False
+        for _ in range(5):  # 5×15s = 75s + 基线 ≈ 90s
+            time.sleep(15)
+            try:
+                s1 = read_state(ws)
+            except Exception:
+                s1 = None
+            if s1:
+                tt = [x for x in s1.get("tasks") or [] if x.get("title") == title]
+                if tt and tt[0].get("complete"):
+                    done = True
+                    print("  ✅ 计分已生效")
+                    break
+        if not done:
+            print("  ⏳ 90s 内未计分（可能任务本身今日不计奖励 rnoreward，非脚本问题）")
+        if ntab:
+            close_tab(ntab)
 
     print(f"\n== waiting {WAIT_SETTLE}s for credits to land ==")
     time.sleep(WAIT_SETTLE)
