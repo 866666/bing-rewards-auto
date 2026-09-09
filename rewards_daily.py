@@ -294,7 +294,8 @@ def get_points_and_state(ws):
 
 def natural_search(ws, query, wait=10):
     """bing.com 主页输入+回车（已验证计分模式）"""
-    cdp_nav(ws, "https://www.bing.com/?cc=us&setmkt=en-US&setlang=en", 6)
+    # 8/27 实测：中文界面（setlang=zh-hans）直连搜索同样计分，无需美区参数；清除早期"必须美区"残留
+    cdp_nav(ws, "https://www.bing.com/?setlang=zh-hans&mkt=zh-CN", 6)
     cdp_js(ws, f"""(() => {{
       const input = document.querySelector('#sb_form_q, input[name=q], textarea[name=q]');
       if (!input) return 'no input';
@@ -313,7 +314,7 @@ def natural_search(ws, query, wait=10):
 def try_quiz(ws):
     """尝试点 Homepage Quiz（best-effort，可能不计分）"""
     try:
-        cdp_nav(ws, "https://www.bing.com/?cc=us&setmkt=en-US&setlang=en", 10)
+        cdp_nav(ws, "https://www.bing.com/?setlang=zh-hans&mkt=zh-CN", 10)
         for _ in range(3):  # 最多 3 题
             has_quiz = cdp_js(ws, """(() => {
               const a = Array.from(document.querySelectorAll('a'))
