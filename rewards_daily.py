@@ -481,15 +481,32 @@ def main():
 
     # 4) PC 搜索
     queries = random.sample(QUERIES_POOL, min(args.count, len(QUERIES_POOL)))
-    p(f"\n  → PC 搜索 {len(queries)} 次（自然搜索模式）")
+    # 前置检查：若开始前配额已满（如当天已手动搜满），直接跳过搜索
+    skip_search = False
+    try:
+        s0obj = json.loads(s0) if isinstance(s0, str) and s0.startswith("{") else None
+        if s0obj and str(s0obj.get("pcSearch", "")).startswith("30/30"):
+            p(f"\n  ⏭ 开始前配额已满 {s0obj.get('pcSearch')}，跳过搜索阶段")
+            skip_search = True
+    except Exception:
+        pass
+    if not skip_search:
+        p(f"\n  → PC 搜索 {len(queries)} 次（自然搜索模式）")
     for i, q in enumerate(queries, 1):
+        if skip_search:
+            break
         natural_search(ws, q, wait=random.uniform(5, 8))
         p(f"    [{i:2d}/{len(queries)}] {q}")
         if i % 5 == 0:
             cur = get_points_and_state(ws)
             p(f"        状态: {cur}")
             # 配额已满则提前收尾（避免剩余搜索白做）
-            if cur and str(cur.get("pcSearch", "")).startswith("30/30") and i < len(queries):
+            # 注意：get_points_and_state 返回 JSON 字符串（或 None），需解析后再取字段
+            try:
+                curobj = json.loads(cur) if isinstance(cur, str) and cur.startswith("{") else None
+            except Exception:
+                curobj = None
+            if curobj and str(curobj.get("pcSearch", "")).startswith("30/30") and i < len(queries):
                 p(f"    ⏭ 配额已满 30/30，提前结束剩余 {len(queries)-i} 次搜索")
                 break
         if i < len(queries):
