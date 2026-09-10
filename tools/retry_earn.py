@@ -15,12 +15,20 @@ TARGET_KEYWORDS = sys.argv[1:] if len(sys.argv) > 1 else None
 
 
 def main_script_running():
+    """主脚本在跑则不并发。读项目根 .rewards_running.lock（含 PID）判断该 PID 是否存活。
+    比"pythonw 数量>1"可靠——本机常驻多个无关 pythonw(opencode_proxy) 会误判。"""
     try:
+        lock = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), ".rewards_running.lock")
+        if not os.path.exists(lock):
+            return False
+        pid = open(lock, encoding="utf-8").read().strip()
+        if not pid.isdigit():
+            return False
         import subprocess
-        out = subprocess.run(["tasklist", "/FO", "CSV", "/FI", "IMAGENAME eq pythonw.exe"],
+        out = subprocess.run(["tasklist", "/FI", f"PID eq {pid}", "/FO", "CSV"],
                              capture_output=True, text=True, encoding="gbk", errors="ignore",
                              timeout=10).stdout
-        return out.lower().count("pythonw.exe") > 1
+        return f'"{pid}"' in out
     except Exception:
         return False
 

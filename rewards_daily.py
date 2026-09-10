@@ -41,6 +41,9 @@ if sys.stderr is None:
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 LOG_PATH = os.path.join(BASE_DIR, "rewards_daily_log.txt")
 CONFIG_PATH = os.path.join(BASE_DIR, ".rewards_config.json")
+# 运行锁：主脚本运行期间写入自身 PID，供 tools/ 下补跑脚本判断是否并发（比"pythonw 进程数"可靠，
+# 本机常驻多个无关 pythonw(如 opencode_proxy) 会导致进程计数误判）
+LOCK_PATH = os.path.join(BASE_DIR, ".rewards_running.lock")
 LOG = open(LOG_PATH, "w", encoding="utf-8")
 def p(*a):
     s = " ".join(str(x) for x in a)
@@ -433,6 +436,13 @@ def main():
     ap.add_argument("--no-edge-hold", action="store_true", help="跳过 30 分钟 Edge 保活（跑完即关）")
     args = ap.parse_args()
 
+    # 写运行锁（含 PID），供补跑脚本判断并发；退出时清理
+    try:
+        with open(LOCK_PATH, "w", encoding="utf-8") as f:
+            f.write(str(os.getpid()))
+    except Exception:
+        pass
+
     if args.setup:
         return setup_wizard()
 
@@ -598,4 +608,9 @@ if __name__ == "__main__":
         p("❌ 未捕获异常：")
         p(traceback.format_exc())
     finally:
+        try:
+            if os.path.exists(LOCK_PATH):
+                os.remove(LOCK_PATH)
+        except Exception:
+            pass
         LOG.close()
