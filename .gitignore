@@ -12,6 +12,9 @@ rewards_diag.png
 *.png
 logs/
 
+# ===== 运行锁（主脚本 PID，仅本机有效）=====
+.rewards_running.lock
+
 # ===== Python =====
 __pycache__/
 *.pyc
