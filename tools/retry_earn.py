@@ -118,14 +118,24 @@ def main():
         title = t["title"]
         print(f"\n[{i}/{len(hand)}] {title}  dest={t['dest'][:80]}")
         before = {x["id"] for x in list_tabs()}
-        cdp_nav(ws, "https://rewards.bing.com/earn", 10)
+        # 任务卡片所在页面不同：dailySet 在 dashboard，more/punch 在 earn（2026-09-10 实测）
+        page = "dashboard" if t.get("src") == "dailySet" else "earn"
+        cdp_nav(ws, f"https://rewards.bing.com/{page}", 10)
         time.sleep(3)
         r = find_task_anchor(ws, title, t["dest"] if t["dest"].startswith("http") else "", timeout=22)
-        print(f"  click: {r}")
+        print(f"  click: {r} (page={page})")
         if str(r).startswith("NO_ANCHOR"):
-            # 兜底：直访 destination（无 tracking 时可能不计，仅作尝试）
+            # 兜底：换另一个页面再找一次，最后才直访 destination
+            other = "earn" if page == "dashboard" else "dashboard"
+            print(f"  {page} 找不到卡片，改试 {other} 页")
+            cdp_nav(ws, f"https://rewards.bing.com/{other}", 10)
+            time.sleep(3)
+            r = find_task_anchor(ws, title, t["dest"] if t["dest"].startswith("http") else "", timeout=18)
+            print(f"  click: {r} (page={other})")
+        if str(r).startswith("NO_ANCHOR"):
+            # 最终兜底：直访 destination（无 tracking 时可能不计，仅作尝试）
             if t["dest"].startswith("http"):
-                print("  (找不到卡片) 直访 destination 试试")
+                print("  (仍找不到卡片) 直访 destination 试试")
                 try:
                     cdp_nav(ws, t["dest"], 8)
                 except Exception as e:
