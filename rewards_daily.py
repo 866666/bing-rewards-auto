@@ -530,15 +530,34 @@ def main():
     # 5.5) Daily Set（3 个 +10 urlreward 每日活动，需从 dashboard 实点击触发计分）
     if not args.no_dailyset:
         p("\n  → 尝试 Daily Set（3×+10 每日活动）")
-        try:
-            ds_script = os.path.join(os.path.dirname(os.path.abspath(__file__)), "tools", "complete_dailyset.py")
-            py = os.path.join(os.path.dirname(os.path.abspath(sys.executable)), "python.exe")
-            r = subprocess.run([py, ds_script], capture_output=True, text=True,
-                               encoding="utf-8", errors="replace", timeout=420)
-            out = ((r.stdout or "") + (r.stderr or "")).strip()
-            p("   " + out.replace("\n", "\n   ")[-1200:])
-        except Exception as e:
-            p(f"  ⚠ Daily Set 执行失败: {e}")
+        ds_script = os.path.join(os.path.dirname(os.path.abspath(__file__)), "tools", "complete_dailyset.py")
+        py = os.path.join(os.path.dirname(os.path.abspath(sys.executable)), "python.exe")
+        # 多轮补跑：单轮连做 3 个任务时，后两个常在 tracking 未完成前被下一任务导航打断
+        # → 每轮结束检查未完成数，有剩余再跑一轮（最多 3 轮），显著提升 3/3 达成率
+        for rnd in range(1, 4):
+            try:
+                r = subprocess.run([py, ds_script], capture_output=True, text=True,
+                                   encoding="utf-8", errors="replace", timeout=420)
+                out = ((r.stdout or "") + (r.stderr or "")).strip()
+                p(f"   [第 {rnd} 轮]\n   " + out.replace("\n", "\n   ")[-900:])
+            except Exception as e:
+                p(f"  ⚠ Daily Set 第 {rnd} 轮执行失败: {e}")
+                break
+            # 检查是否还有未完成的 Daily Set
+            time.sleep(5)
+            st = get_points_and_state(ws)
+            try:
+                sobj = json.loads(st) if isinstance(st, str) and st.startswith("{") else None
+            except Exception:
+                sobj = None
+            if not sobj:
+                break
+            left = int((sobj.get("dailySetComplete") or "0/3").split("/")[0])
+            if left >= 3:
+                p("    ✅ 每日活动 3/3 已完成")
+                break
+            if rnd < 3:
+                p(f"    ↻ 还有 {3-left} 个未完成，补跑第 {rnd+1} 轮...")
 
     # 6) 等 30s 让计分到账
     p("\n  → 等 30s 让计分到账...")
