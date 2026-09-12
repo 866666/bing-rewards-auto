@@ -24,6 +24,8 @@ archive/
 
 # ===== 一次性网络工具 =====
 tools/add_github_hosts.bat
+# 临时调试/探测脚本（下划线前缀，不留库）
+tools/_tmp_*.py
 # ===== GitHub 授权 token 临时文件（绝不入库）=====
 .gh_token.tmp
 tools/.gh_token.tmp

@@ -528,36 +528,54 @@ def main():
         try_quiz(ws)
 
     # 5.5) Daily Set（3 个 +10 urlreward 每日活动，需从 dashboard 实点击触发计分）
+    dailyset_ok = None  # None=未验证 / True=3/3 达成 / False=未达成
     if not args.no_dailyset:
         p("\n  → 尝试 Daily Set（3×+10 每日活动）")
         ds_script = os.path.join(os.path.dirname(os.path.abspath(__file__)), "tools", "complete_dailyset.py")
         py = os.path.join(os.path.dirname(os.path.abspath(sys.executable)), "python.exe")
         # 多轮补跑：单轮连做 3 个任务时，后两个常在 tracking 未完成前被下一任务导航打断
         # → 每轮结束检查未完成数，有剩余再跑一轮（最多 3 轮），显著提升 3/3 达成率
+        # 2026-09-12 起：严格区分「API 不可达」与「确实完成」。读不到状态一律按未完成处理并明确告警，
+        # 绝不因 API 波动谎报成功（旧版曾打印"已完成"却实际 0/3，用户只能手动补点）。
         for rnd in range(1, 4):
             try:
                 r = subprocess.run([py, ds_script], capture_output=True, text=True,
                                    encoding="utf-8", errors="replace", timeout=420)
                 out = ((r.stdout or "") + (r.stderr or "")).strip()
-                p(f"   [第 {rnd} 轮]\n   " + out.replace("\n", "\n   ")[-900:])
+                verdict = next((l.strip() for l in reversed(out.splitlines())
+                                if l.strip().startswith(("DONE", "INCOMPLETE", "UNVERIFIED"))), "")
+                p(f"   [第 {rnd} 轮] 退出码={r.returncode} {verdict}")
+                p("   " + out.replace("\n", "\n   ")[-1500:])
             except Exception as e:
                 p(f"  ⚠ Daily Set 第 {rnd} 轮执行失败: {e}")
                 break
-            # 检查是否还有未完成的 Daily Set
+            # 检查是否还有未完成的 Daily Set（API 偶发不可达 → 重试几次再判定）
             time.sleep(5)
-            st = get_points_and_state(ws)
-            try:
-                sobj = json.loads(st) if isinstance(st, str) and st.startswith("{") else None
-            except Exception:
-                sobj = None
+            sobj = None
+            for _try in range(3):
+                st = get_points_and_state(ws)
+                try:
+                    sobj = json.loads(st) if isinstance(st, str) and st.startswith("{") else None
+                except Exception:
+                    sobj = None
+                if sobj:
+                    break
+                time.sleep(10)
             if not sobj:
+                p("    ⚠ 积分 API 不可达，无法验证 Daily Set 完成情况（按未完成处理）")
                 break
             left = int((sobj.get("dailySetComplete") or "0/3").split("/")[0])
+            dailyset_ok = (left >= 3)
             if left >= 3:
                 p("    ✅ 每日活动 3/3 已完成")
                 break
             if rnd < 3:
                 p(f"    ↻ 还有 {3-left} 个未完成，补跑第 {rnd+1} 轮...")
+        if dailyset_ok is None:
+            p("    ⚠ 每日活动【未验证】：本次未能读到 Daily Set 状态（rewards API 波动），不计为完成")
+            p("       → 稍后手动补跑： python rewards_daily.py   或   python tools/complete_dailyset.py")
+        elif not dailyset_ok:
+            p("    ⚠ 每日活动【未达成 3/3】（网络/计分延迟可能）——稍后可重跑 tools/complete_dailyset.py 补做")
 
     # 6) 等 30s 让计分到账
     p("\n  → 等 30s 让计分到账...")
@@ -577,6 +595,16 @@ def main():
             p("    如需核对积分增量，带 --with-clash 挂美国节点再跑一次。")
     except Exception as e:
         p(f"  ⚠ 积分解析失败: {e}")
+
+    # 每日活动结论（固定只做「搜索 + 每日活动」，故此项必须显式汇报，避免"看着像成功"）
+    if args.no_dailyset:
+        p("  🎯 每日活动: 已跳过（--no-dailyset）")
+    elif dailyset_ok is True:
+        p("  🎯 每日活动: 3/3 ✅")
+    elif dailyset_ok is False:
+        p("  🎯 每日活动: 未达成 3/3 ⚠  ← 请手动补跑 tools/complete_dailyset.py")
+    else:
+        p("  🎯 每日活动: 未验证 ⚠（rewards API 波动）  ← 请手动补跑 tools/complete_dailyset.py")
 
     cdp_shot(ws, os.path.join(BASE_DIR, "rewards_daily_done.png"))
     p(f"\n  📸 截图: rewards_daily_done.png")

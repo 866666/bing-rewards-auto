@@ -105,8 +105,28 @@ def cdp_nav(ws, url, wait=10):
     cdp_send(ws, "Page.navigate", {"url": url})
     time.sleep(wait)
 
+def _eval_with_retry(ws, js, tries=3, delay=6, timeout=30):
+    """执行返回字符串的 XHR JS；遇到 API_ERR / JS_EXC / 空值自动重试。
+    2026-09-12 教训：rewards API 会偶发不可达（JS_EXC: Failed to load getuserinfo），
+    一次性读取失败曾被误当成"任务已完成"。这里统一做重试，仍失败则返回 None。"""
+    last = None
+    for i in range(1, tries + 1):
+        try:
+            v = cdp_js(ws, js, timeout=timeout, await_promise=True)
+        except Exception as e:
+            v = f"JS_EXC:{e}"
+        if v and not str(v).startswith(("API_ERR", "JS_EXC")):
+            return v
+        last = v
+        print(f"  [x] api({i}/{tries}): {v}")
+        if i < tries:
+            time.sleep(delay)
+    return None
+
+
 def read_state(ws):
-    """读积分 + 当天 dailySet 状态"""
+    """读积分 + 当天 dailySet 状态。
+    ⚠ 返回 None 表示 API 不可达（≠ 已完成）；调用方必须区分 None 与真实 0 未完成。"""
     today = time.strftime("%m/%d/%Y")
     js = """(async () => {
       try {
@@ -120,19 +140,28 @@ def read_state(ws):
         const ctrs = us.counters || {};
         return JSON.stringify({
           points: us.availablePoints,
-          dailySetComplete: (ctrs.activityAndQuiz?.[0]?.pointProgress ?? '?') + '/' + (ctrs.activityAndQuiz?.[0]?.pointProgressMax ?? '?'),
-          tasks: dsp.map(t => ({title: t.title, complete: t.complete, hash: t.hash}))
+          level: us.levelInfo ? us.levelInfo.activeLevelName : null,
+          pcSearch: (ctrs.pcSearch?.[0]?.attributes?.progress ?? '?') + '/' + (ctrs.pcSearch?.[0]?.attributes?.max ?? '?'),
+          activity: (ctrs.activityAndQuiz?.[0]?.pointProgress ?? '?') + '/' + (ctrs.activityAndQuiz?.[0]?.pointProgressMax ?? '?'),
+          dailyPoint: (ctrs.dailyPoint?.[0]?.pointProgress ?? '?') + '/' + (ctrs.dailyPoint?.[0]?.pointProgressMax ?? '?'),
+          dailySetDone: dsp.reduce((s, t) => s + (t.complete ? 1 : 0), 0),
+          dailySetTotal: dsp.length,
+          tasks: dsp.map(t => ({title: t.title, complete: !!t.complete, hash: t.hash}))
         });
       } catch(e) { return 'JS_EXC:' + e.message; }
     })()"""
-    v = cdp_js(ws, js, timeout=30, await_promise=True)
-    if not v or str(v).startswith("API_ERR") or str(v).startswith("JS_EXC"):
-        print(f"  [x] api: {v}")
+    v = _eval_with_retry(ws, js)
+    if not v:
         return None
-    return json.loads(v)
+    try:
+        return json.loads(v)
+    except Exception:
+        return None
+
 
 def read_tasks(ws):
-    """拿当天任务列表（含 destination）"""
+    """拿当天任务列表（含 destination）。
+    ⚠ 返回 None = API 不可达（**绝不等于"没有任务"**）；返回 [] = API 正常但今日列表为空。"""
     today = time.strftime("%m/%d/%Y")
     js = """(async () => {
       try {
@@ -143,16 +172,18 @@ def read_tasks(ws):
         const j = JSON.parse(xhr.responseText);
         const dsp = (j.dashboard.dailySetPromotions || {})['""" + today + """'] || [];
         return JSON.stringify(dsp.map(t => ({
-          title: t.title, complete: t.complete, type: t.attributes ? t.attributes.type : null,
+          title: t.title, complete: !!t.complete, type: t.attributes ? t.attributes.type : null,
           destination: t.attributes ? t.attributes.destination : null
         })));
       } catch(e) { return 'JS_EXC:' + e.message; }
     })()"""
-    v = cdp_js(ws, js, timeout=30, await_promise=True)
-    if not v or str(v).startswith("API_ERR") or str(v).startswith("JS_EXC"):
-        print(f"  [x] api: {v}")
-        return []
-    return json.loads(v)
+    v = _eval_with_retry(ws, js)
+    if not v:
+        return None
+    try:
+        return json.loads(v)
+    except Exception:
+        return None
 
 def list_tabs():
     """列出当前所有 page tab"""
@@ -273,10 +304,22 @@ def main():
     print("baseline :", json.dumps(s0, ensure_ascii=False) if s0 else "n/a")
 
     tasks = read_tasks(ws)
+    # ⚠ 关键修复（2026-09-12）：API 不可达 ≠ 任务已完成。
+    # 旧版把"读不到"当成"没任务可做"，于是打印"已完成"并返回 0 —— 谎报成功，用户只能手动补点。
+    if tasks is None:
+        print("  ⚠ 无法读取 Daily Set 任务列表（rewards API 不可达）")
+        print("     本轮未执行任何点击，也未能验证状态 —— 按【未完成】处理，请稍后重跑")
+        ws.close()
+        return 2
+    print(f"任务列表 : {len(tasks)} 个（已完成 {sum(1 for t in tasks if t.get('complete'))} 个）")
+    if not tasks:
+        print("  ⚠ API 正常但今日任务列表为空（可能尚未发布或日期键不匹配），无需操作")
+        ws.close()
+        return 0
     todo = [t for t in tasks if not t["complete"] and t.get("destination")]
     print(f"todo     : {len(todo)} 个未完成任务")
     if not todo:
-        print("今天的 Daily Set 已完成或没有 destination，无需操作")
+        print("今天的 Daily Set 已全部完成（或剩余任务无 destination），无需操作")
         ws.close()
         return 0
 
@@ -318,7 +361,7 @@ def main():
                     print("  ✅ 计分已生效")
                     break
         if not done:
-            print("  ⏳ 90s 内未计分（可能任务本身今日不计奖励 rnoreward，非脚本问题）")
+            print("  ⏳ 90s 内未观察到 complete=true（可能是网络/计分延迟，也可能是任务今日确实不计奖励）")
         if ntab:
             close_tab(ntab)
 
@@ -334,8 +377,20 @@ def main():
             mark = "✅" if b.get("complete") else "❌"
             print(f"  {mark} {b.get('title')}: {a.get('complete')} -> {b.get('complete')}")
     ws.close()
-    print("\nDONE")
-    return 0
+
+    # --- 结束自检：必须真实读到状态才能判定"成功" ---
+    if s1 is None:
+        print("\nUNVERIFIED  Daily Set 状态未验证（rewards API 不可达）——不得视为完成，请重跑")
+        return 2
+    done_n = s1.get("dailySetDone")
+    total_n = s1.get("dailySetTotal") or 3
+    if done_n is None:
+        done_n = sum(1 for t in (s1.get("tasks") or []) if t.get("complete"))
+    if done_n >= 3:
+        print(f"\nDONE  ✅ Daily Set {done_n}/{total_n} 全部完成")
+        return 0
+    print(f"\nINCOMPLETE  ⚠ Daily Set 仅 {done_n}/{total_n} 完成 —— 稍后可重跑本脚本补做")
+    return 4
 
 if __name__ == "__main__":
     sys.exit(main())
