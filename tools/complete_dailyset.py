@@ -201,6 +201,18 @@ def close_tab(tab_id):
         pass
 
 
+# 奖励归属参数标记：链接里至少要有其中之一，点击才会计分。
+# 2026-09-14 实证：微软偶尔生成**缺归属参数**的 urlreward 活动链接
+#（当日 Child2「芝加哥湖畔秋日清凉」只有 filters=sid:"..."，裸引号且无 key），
+# 这种链接无论点多少次、换什么姿势都不计分 —— 属微软侧数据问题，重试无意义。
+ATTR_MARKERS = ("BTEPOKey", "BTDSUOID", "PUBL=RewardsDO", "CREA=")
+
+
+def offer_attributed(destination):
+    """活动链接是否带奖励归属参数。"""
+    return bool(destination) and any(m in destination for m in ATTR_MARKERS)
+
+
 def task_marker(destination, title):
     """从 destination 提取稳定标识用于 href 匹配（比 innerText 匹配可靠）。
     优先取 ?q= 参数（URL 解码），回退 path/query 片段。"""
@@ -228,11 +240,27 @@ def find_task_anchor(ws, title, destination="", timeout=25):
     无 arguments 导致匹配失效（2026-09-09 实测：中文+URL 编码 href 曾全部 NO_ANCHOR）。"""
     marker = task_marker(destination, title)
     kw_title = (title or "").strip()
+    # ⚠ 2026-09-14 根因：部分卡片的 href 里 filters 参数带**未编码的裸引号**
+    #（如 filters=sid:"9696dafd-..."&rnoreward=1，微软自己渲染的畸形 URL）。
+    # 直接 click → 新 tab URL 无效 / 搜索页不加载 → 不计分（日志表现为 "new tab opened: " 为空）。
+    # 解决：点击前对 href 做**最小转义**（只补非法字符，不动已编码的 %xx），再 setAttribute 后 click。
+    fix_href_js = """const fixHref = (el) => {
+      const raw = el.getAttribute('href') || '';
+      if (/["<>`\\s]/.test(raw)) {
+        const f = raw.replace(/"/g,'%22').replace(/</g,'%3C').replace(/>/g,'%3E')
+                     .replace(/`/g,'%60').replace(/\\s/g,'%20');
+        el.setAttribute('href', f);
+        return f;
+      }
+      return '';
+    };
+    const clickAnchor = (el) => { const f = fixHref(el); el.click(); return f ? ('CLICKED_FIXED|' + f) : 'CLICKED'; };"""
     js = """(async () => {
       const marker = __MARKER__;   // 解码后的目的地搜索词
       const kwTitle = __KW__;
       const deadline = __TIMEOUT__ * 1000;
       const t0 = Date.now();
+      __FIXJS__
       // 卡片标题 ≠ 实际搜索词（观星建议→如何辨认仙后座）；且 q 参数编码多样(+ / %20 / %e5%a6%82)。
       // 故对每个锚点用 URLSearchParams 取出 q 解码后，再与目的地搜索词做大小写不敏感匹配（编码无关）。
       const decMarker = marker ? marker.toLowerCase() : '';
@@ -247,20 +275,24 @@ def find_task_anchor(ws, title, destination="", timeout=25):
           });
         }
         if (!a && kwTitle) a = anchors.find(e => (e.innerText || '').includes(kwTitle.slice(0, 4)));
-        if (a) { a.click(); return 'CLICKED'; }
+        if (a) return clickAnchor(a);
         window.scrollBy(0, 500);  // 触发懒加载
         await new Promise(r => setTimeout(r, 800));
       }
       return 'NO_ANCHOR:' + marker;
     })()"""
-    js = js.replace("__MARKER__", json.dumps(marker)).replace("__KW__", json.dumps(kw_title)).replace("__TIMEOUT__", str(timeout))
+    js = (js.replace("__MARKER__", json.dumps(marker))
+            .replace("__KW__", json.dumps(kw_title))
+            .replace("__FIXJS__", fix_href_js)
+            .replace("__TIMEOUT__", str(timeout)))
     r = cdp_js(ws, js, timeout=timeout + 10, await_promise=True)
-    if str(r) == "CLICKED":
+    if str(r).startswith("CLICKED"):
         return r
-    # 兜底：再按 innerText 完整标题试一次（并同时用 href 编码串再扫一轮）
+    # 兜底：再按 innerText 完整标题试一次（并同时用 href 解码后的 q 再扫一轮）
     js2 = """(() => {
       const kwTitle = __KW__;
       const decMarker = __MARKER__ ? __MARKER__.toLowerCase() : '';
+      __FIXJS__
       const anchors = [...document.querySelectorAll('a[target=_blank][href*="bing.com"]')];
       let a = anchors.find(e => (e.innerText || '').includes(kwTitle));
       if (!a && decMarker)
@@ -270,9 +302,11 @@ def find_task_anchor(ws, title, destination="", timeout=25):
           return q && q.toLowerCase().includes(decMarker);
         });
       if (!a) return 'NO_ANCHOR2';
-      a.click(); return 'CLICKED';
+      return clickAnchor(a);
     })()"""
-    js2 = js2.replace("__KW__", json.dumps(kw_title)).replace("__MARKER__", json.dumps(marker))
+    js2 = (js2.replace("__KW__", json.dumps(kw_title))
+              .replace("__MARKER__", json.dumps(marker))
+              .replace("__FIXJS__", fix_href_js))
     return cdp_js(ws, js2, timeout=15)
 
 
@@ -323,26 +357,43 @@ def main():
         ws.close()
         return 0
 
+    broken = []  # 链接缺奖励归属参数的活动：点了也不计分，属微软侧数据问题
     for i, t in enumerate(todo, 1):
         title = t["title"]
+        if not offer_attributed(t.get("destination", "")):
+            print(f"\n[{i}/{len(todo)}] {title}  ⚠ 跳过")
+            print("  ! 该活动链接缺少奖励归属参数（无 BTEPOKey / PUBL=RewardsDO）")
+            print("    → 点击不会计分，属微软侧数据问题，重试无意义（该活动通常当日结束后失效）")
+            broken.append(title)
+            continue
         print(f"\n[{i}/{len(todo)}] {title}  type={t['type']}")
         before = {x["id"] for x in list_tabs()}
         r = find_task_anchor(ws, title, t.get("destination", ""))
-        print(f"  click: {r}")
+        print(f"  click: {str(r)[:170]}")
         if str(r).startswith("NO_ANCHOR"):
             print("  ! 找不到卡片锚点，跳过")
             continue
+        # 若卡片 href 是畸形 URL（裸引号），find_task_anchor 会返回转义后的 URL 供兜底
+        fixed_url = str(r).split("|", 1)[1].strip() if str(r).startswith("CLICKED_FIXED|") else ""
         nws, ntab = wait_for_new_tab(before)
+        tab_url = ""
         if nws and ntab:
             try:
                 tb = [x for x in list_tabs() if x["id"] == ntab][0]
-                print(f"  new tab opened: {tb.get('url', '')[:100]}")
+                tab_url = tb.get("url", "") or ""
+                print(f"  new tab opened: {tab_url[:100]}")
             except Exception:
                 pass
             nws.close()  # 只断开 CDP 连接，保留浏览器 tab 让 tracking 跑完
             print("  保留新 tab，回 dashboard 轮询计分（最长 90s）...")
         else:
             print("  ! 未捕获新 tab，等待补偿")
+            time.sleep(WAIT_PER_TASK)
+        # 兜底（2026-09-14）：畸形 href 被转义后，若新 tab 仍未真正加载搜索页
+        #（URL 为空 / about:blank / 不在 /search），直接用转义后的 URL 新开一个 tab。
+        if fixed_url and ("/search" not in tab_url):
+            print(f"  ↻ 新 tab 未加载搜索页，改用转义 URL 直开: {fixed_url[:110]}")
+            cdp_new_page(fixed_url)
             time.sleep(WAIT_PER_TASK)
         # 回 dashboard 并轮询该任务是否完成
         cdp_nav(ws, "https://rewards.bing.com/dashboard", 8)
@@ -389,6 +440,11 @@ def main():
     if done_n >= 3:
         print(f"\nDONE  ✅ Daily Set {done_n}/{total_n} 全部完成")
         return 0
+    if broken:
+        print(f"\nBLOCKED  ⚠ Daily Set {done_n}/{total_n}；{len(broken)} 个活动链接异常，无法完成（微软侧数据问题）")
+        for b in broken:
+            print(f"         · {b}")
+        return 5
     print(f"\nINCOMPLETE  ⚠ Daily Set 仅 {done_n}/{total_n} 完成 —— 稍后可重跑本脚本补做")
     return 4
 

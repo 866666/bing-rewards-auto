@@ -529,6 +529,7 @@ def main():
 
     # 5.5) Daily Set（3 个 +10 urlreward 每日活动，需从 dashboard 实点击触发计分）
     dailyset_ok = None  # None=未验证 / True=3/3 达成 / False=未达成
+    dailyset_blocked = False  # True=剩余活动链接缺奖励标识（微软侧数据问题，重试无意义）
     if not args.no_dailyset:
         p("\n  → 尝试 Daily Set（3×+10 每日活动）")
         ds_script = os.path.join(os.path.dirname(os.path.abspath(__file__)), "tools", "complete_dailyset.py")
@@ -543,7 +544,9 @@ def main():
                                    encoding="utf-8", errors="replace", timeout=420)
                 out = ((r.stdout or "") + (r.stderr or "")).strip()
                 verdict = next((l.strip() for l in reversed(out.splitlines())
-                                if l.strip().startswith(("DONE", "INCOMPLETE", "UNVERIFIED"))), "")
+                                if l.strip().startswith(("DONE", "INCOMPLETE", "UNVERIFIED", "BLOCKED"))), "")
+                if verdict.startswith("BLOCKED"):
+                    dailyset_blocked = True
                 p(f"   [第 {rnd} 轮] 退出码={r.returncode} {verdict}")
                 p("   " + out.replace("\n", "\n   ")[-1500:])
             except Exception as e:
@@ -569,11 +572,16 @@ def main():
             if left >= 3:
                 p("    ✅ 每日活动 3/3 已完成")
                 break
+            if dailyset_blocked:
+                p("    ⚠ 剩余活动链接缺少奖励标识（微软侧数据问题），点了也不计分 —— 停止补跑")
+                break
             if rnd < 3:
                 p(f"    ↻ 还有 {3-left} 个未完成，补跑第 {rnd+1} 轮...")
         if dailyset_ok is None:
             p("    ⚠ 每日活动【未验证】：本次未能读到 Daily Set 状态（rewards API 波动），不计为完成")
             p("       → 稍后手动补跑： python rewards_daily.py   或   python tools/complete_dailyset.py")
+        elif dailyset_blocked:
+            p("    ⚠ 每日活动【未达成】：存在微软侧数据异常活动（链接缺奖励标识），无法完成，无需重试")
         elif not dailyset_ok:
             p("    ⚠ 每日活动【未达成 3/3】（网络/计分延迟可能）——稍后可重跑 tools/complete_dailyset.py 补做")
 
@@ -601,6 +609,8 @@ def main():
         p("  🎯 每日活动: 已跳过（--no-dailyset）")
     elif dailyset_ok is True:
         p("  🎯 每日活动: 3/3 ✅")
+    elif dailyset_blocked:
+        p("  🎯 每日活动: 未达成 ⚠  ← 微软侧活动数据异常（链接缺奖励标识），无法完成，无需补跑")
     elif dailyset_ok is False:
         p("  🎯 每日活动: 未达成 3/3 ⚠  ← 请手动补跑 tools/complete_dailyset.py")
     else:
