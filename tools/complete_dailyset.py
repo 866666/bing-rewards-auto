@@ -201,15 +201,16 @@ def close_tab(tab_id):
         pass
 
 
-# 奖励归属参数标记：链接里至少要有其中之一，点击才会计分。
-# 2026-09-14 实证：微软偶尔生成**缺归属参数**的 urlreward 活动链接
-#（当日 Child2「芝加哥湖畔秋日清凉」只有 filters=sid:"..."，裸引号且无 key），
-# 这种链接无论点多少次、换什么姿势都不计分 —— 属微软侧数据问题，重试无意义。
+# 奖励归属参数标记（仅供参考的**提示**，不是"跳过"依据）。
+# 2026-09-14：曾因当日 Child2「芝加哥湖畔秋日清凉」的链接只有 filters=sid:"..."（无下面这些参数），
+# 误判为"微软侧坏活动、无法完成"并加了跳过逻辑 —— 随后用户**手动点击即完成**，证明判断错误。
+# 真正原因是脚本用 el.click()（非受信任事件）点不动该卡片，已改为 CDP 真实鼠标事件。
+# 保留此函数仅用于在不计分时提示方向。
 ATTR_MARKERS = ("BTEPOKey", "BTDSUOID", "PUBL=RewardsDO", "CREA=")
 
 
 def offer_attributed(destination):
-    """活动链接是否带奖励归属参数。"""
+    """活动链接是否带常见奖励归属参数（仅作诊断提示）。"""
     return bool(destination) and any(m in destination for m in ATTR_MARKERS)
 
 
@@ -229,22 +230,37 @@ def task_marker(destination, title):
     return marker or (title or "").strip()[:4]
 
 
+def trusted_click(ws, x, y):
+    """用 CDP Input.dispatchMouseEvent 派发**真实鼠标事件**（trusted user gesture）。
+    2026-09-14：当日 Child2「芝加哥湖畔秋日清凉」用 `el.click()` 点了多轮始终不计分，
+    而用户在同一台机器**手动点击即完成** —— 手动点击是 trusted 输入事件，
+    `el.click()` 不是。故改用 CDP Input 源复现真实点击。（实测：真实鼠标事件下该卡片
+    新 tab 2 秒内即正常加载 /search 页。）"""
+    cdp_send(ws, "Input.dispatchMouseEvent",
+             {"type": "mouseMoved", "x": x, "y": y, "button": "none", "buttons": 0}, timeout=15)
+    time.sleep(0.15)
+    cdp_send(ws, "Input.dispatchMouseEvent",
+             {"type": "mousePressed", "x": x, "y": y, "button": "left", "buttons": 1, "clickCount": 1},
+             timeout=15)
+    time.sleep(0.08)
+    cdp_send(ws, "Input.dispatchMouseEvent",
+             {"type": "mouseReleased", "x": x, "y": y, "button": "left", "buttons": 0, "clickCount": 1},
+             timeout=15)
+
+
 def find_task_anchor(ws, title, destination="", timeout=25):
-    """在 dashboard 找任务卡 <a> 并真实点击（触发 React onClick + target=_blank 新开窗口）。
+    """在 dashboard 找任务卡 <a>，并**用真实鼠标事件点击**（等价手动点击，触发 target=_blank 新开窗口）。
     匹配策略（多级，最稳优先）：
-      1) href 含 destination 的 q 参数编码串（URL 编码/大小写不敏感）—— 中文搜索词专用
-      2) href 含 destination 的 q 参数解码后的关键词（中文原样）
-      3) innerText 含标题前 4 字
-      4) innerText 含完整标题（兜底）
-    轮询等待卡片渲染（懒加载）。marker/kwTitle 直接 json.dumps 注入，避免 Runtime.evaluate
-    无 arguments 导致匹配失效（2026-09-09 实测：中文+URL 编码 href 曾全部 NO_ANCHOR）。"""
+      1) 锚点 href 的 q 参数解码后与 destination 的 q 一致（大小写不敏感）—— 中文搜索词专用
+      2) innerText 含标题前 4 字  →  3) 完整标题兜底
+    流程：JS 只负责「定位 + 转义畸形 href + 返回视口坐标」，点击交给 CDP Input 源（trusted）；
+    若 Input 通道异常则回退 `el.click()`。返回 'TRUSTED_CLICK' / 'JS_CLICK'（可带 '|固定后URL'）。"""
     marker = task_marker(destination, title)
     kw_title = (title or "").strip()
-    # ⚠ 2026-09-14 根因：部分卡片的 href 里 filters 参数带**未编码的裸引号**
-    #（如 filters=sid:"9696dafd-..."&rnoreward=1，微软自己渲染的畸形 URL）。
-    # 直接 click → 新 tab URL 无效 / 搜索页不加载 → 不计分（日志表现为 "new tab opened: " 为空）。
-    # 解决：点击前对 href 做**最小转义**（只补非法字符，不动已编码的 %xx），再 setAttribute 后 click。
-    fix_href_js = """const fixHref = (el) => {
+    # 部分卡片的 href 里 filters 参数带**未编码的裸引号**（如 filters=sid:"9696dafd-..."），
+    # 属微软渲染的畸形 URL；先做最小转义（只补非法字符，不动已编码的 %xx）再点，更安全。
+    fix_href_js = """const SEL = 'a[target=_blank][href*="bing.com"]';
+    const fixHref = (el) => {
       const raw = el.getAttribute('href') || '';
       if (/["<>`\\s]/.test(raw)) {
         const f = raw.replace(/"/g,'%22').replace(/</g,'%3C').replace(/>/g,'%3E')
@@ -254,28 +270,40 @@ def find_task_anchor(ws, title, destination="", timeout=25):
       }
       return '';
     };
-    const clickAnchor = (el) => { const f = fixHref(el); el.click(); return f ? ('CLICKED_FIXED|' + f) : 'CLICKED'; };"""
+    const pickIdx = (anchors, marker, kwTitle) => {
+      const dec = marker ? marker.toLowerCase() : '';
+      let i = -1;
+      if (dec) i = anchors.findIndex(e => {
+        let q = '';
+        try { q = new URL(e.getAttribute('href'), location.origin).searchParams.get('q') || ''; } catch(err){}
+        return q && q.toLowerCase().includes(dec);
+      });
+      if (i < 0 && kwTitle) i = anchors.findIndex(e => (e.innerText || '').includes(kwTitle.slice(0, 4)));
+      if (i < 0 && kwTitle) i = anchors.findIndex(e => (e.innerText || '').includes(kwTitle));
+      return i;
+    };"""
     js = """(async () => {
-      const marker = __MARKER__;   // 解码后的目的地搜索词
+      const marker = __MARKER__;
       const kwTitle = __KW__;
       const deadline = __TIMEOUT__ * 1000;
       const t0 = Date.now();
       __FIXJS__
-      // 卡片标题 ≠ 实际搜索词（观星建议→如何辨认仙后座）；且 q 参数编码多样(+ / %20 / %e5%a6%82)。
-      // 故对每个锚点用 URLSearchParams 取出 q 解码后，再与目的地搜索词做大小写不敏感匹配（编码无关）。
-      const decMarker = marker ? marker.toLowerCase() : '';
       while (Date.now() - t0 < deadline) {
-        const anchors = [...document.querySelectorAll('a[target=_blank][href*="bing.com"]')];
-        let a = null;
-        if (marker) {
-          a = anchors.find(e => {
-            let q = '';
-            try { q = new URL(e.getAttribute('href'), location.origin).searchParams.get('q') || ''; } catch(e){}
-            return q && decMarker && q.toLowerCase().includes(decMarker);
-          });
+        const anchors = [...document.querySelectorAll(SEL)];
+        const i = pickIdx(anchors, marker, kwTitle);
+        if (i >= 0) {
+          const a = anchors[i];
+          const fixed = fixHref(a);          // 先修 href，再取坐标，再交给 CDP 真点
+          a.scrollIntoView({block: 'center', inline: 'center'});
+          await new Promise(r => setTimeout(r, 250));
+          const r = a.getBoundingClientRect();
+          if (r.width === 0 || r.height === 0) { window.scrollBy(0, 300); await new Promise(r2 => setTimeout(r2, 400)); }
+          const r2 = a.getBoundingClientRect();
+          return JSON.stringify({idx: [...document.querySelectorAll(SEL)].indexOf(a),
+                                 x: Math.round(r2.left + r2.width / 2),
+                                 y: Math.round(r2.top + r2.height / 2),
+                                 fixed: fixed || ''});
         }
-        if (!a && kwTitle) a = anchors.find(e => (e.innerText || '').includes(kwTitle.slice(0, 4)));
-        if (a) return clickAnchor(a);
         window.scrollBy(0, 500);  // 触发懒加载
         await new Promise(r => setTimeout(r, 800));
       }
@@ -286,28 +314,28 @@ def find_task_anchor(ws, title, destination="", timeout=25):
             .replace("__FIXJS__", fix_href_js)
             .replace("__TIMEOUT__", str(timeout)))
     r = cdp_js(ws, js, timeout=timeout + 10, await_promise=True)
-    if str(r).startswith("CLICKED"):
-        return r
-    # 兜底：再按 innerText 完整标题试一次（并同时用 href 解码后的 q 再扫一轮）
-    js2 = """(() => {
-      const kwTitle = __KW__;
-      const decMarker = __MARKER__ ? __MARKER__.toLowerCase() : '';
-      __FIXJS__
-      const anchors = [...document.querySelectorAll('a[target=_blank][href*="bing.com"]')];
-      let a = anchors.find(e => (e.innerText || '').includes(kwTitle));
-      if (!a && decMarker)
-        a = anchors.find(e => {
-          let q = '';
-          try { q = new URL(e.getAttribute('href'), location.origin).searchParams.get('q') || ''; } catch(e){}
-          return q && q.toLowerCase().includes(decMarker);
-        });
-      if (!a) return 'NO_ANCHOR2';
-      return clickAnchor(a);
-    })()"""
-    js2 = (js2.replace("__KW__", json.dumps(kw_title))
-              .replace("__MARKER__", json.dumps(marker))
-              .replace("__FIXJS__", fix_href_js))
-    return cdp_js(ws, js2, timeout=15)
+
+    if not (isinstance(r, str) and r.startswith("{")):
+        return r if r else "NO_ANCHOR:" + marker  # NO_ANCHOR:... 原样返回
+
+    info = json.loads(r)
+    tag = None
+    try:
+        trusted_click(ws, info["x"], info["y"])
+        tag = "TRUSTED_CLICK"
+    except Exception as e:
+        print(f"  ! CDP 真实鼠标事件失败（{e}），回退 el.click()")
+    if tag is None:
+        # 回退：非受信任 el.click()（对部分卡片可能不生效）
+        js_click = """(() => {
+          const a = [...document.querySelectorAll('a[target=_blank][href*="bing.com"]')][__IDX__];
+          if (!a) return 'NO_ANCHOR2';
+          a.click(); return 'JS_CLICK';
+        })()""".replace("__IDX__", str(info["idx"]))
+        tag = cdp_js(ws, js_click, timeout=15) or "NO_ANCHOR2"
+    if info.get("fixed"):
+        return f"{tag}|{info['fixed']}"
+    return tag
 
 
 def wait_for_new_tab(before_ids, max_wait=12):
@@ -357,16 +385,13 @@ def main():
         ws.close()
         return 0
 
-    broken = []  # 链接缺奖励归属参数的活动：点了也不计分，属微软侧数据问题
     for i, t in enumerate(todo, 1):
         title = t["title"]
-        if not offer_attributed(t.get("destination", "")):
-            print(f"\n[{i}/{len(todo)}] {title}  ⚠ 跳过")
-            print("  ! 该活动链接缺少奖励归属参数（无 BTEPOKey / PUBL=RewardsDO）")
-            print("    → 点击不会计分，属微软侧数据问题，重试无意义（该活动通常当日结束后失效）")
-            broken.append(title)
-            continue
         print(f"\n[{i}/{len(todo)}] {title}  type={t['type']}")
+        # 提示（**不跳过**）：链接缺常见归属参数时，若本轮不计分多半是微软侧数据异常，
+        # 而不是我们点得不对 —— 2026-09-14 实测：这类活动手动点仍可完成，故照常点击。
+        if not offer_attributed(t.get("destination", "")):
+            print("  ℹ 链接未带常见奖励归属参数（BTEPOKey / PUBL=RewardsDO）；若不计分多为微软侧数据异常，可稍后重跑")
         before = {x["id"] for x in list_tabs()}
         r = find_task_anchor(ws, title, t.get("destination", ""))
         print(f"  click: {str(r)[:170]}")
@@ -374,17 +399,20 @@ def main():
             print("  ! 找不到卡片锚点，跳过")
             continue
         # 若卡片 href 是畸形 URL（裸引号），find_task_anchor 会返回转义后的 URL 供兜底
-        fixed_url = str(r).split("|", 1)[1].strip() if str(r).startswith("CLICKED_FIXED|") else ""
+        fixed_url = str(r).split("|", 1)[1].strip() if "|" in str(r) else ""
         nws, ntab = wait_for_new_tab(before)
         tab_url = ""
         if nws and ntab:
-            try:
-                tb = [x for x in list_tabs() if x["id"] == ntab][0]
-                tab_url = tb.get("url", "") or ""
-                print(f"  new tab opened: {tab_url[:100]}")
-            except Exception:
-                pass
             nws.close()  # 只断开 CDP 连接，保留浏览器 tab 让 tracking 跑完
+            # ⚠ 延迟轮询：/json/list 里刚出现的 tab，url 字段常常还是空串（导航未提交）。
+            # 旧版立刻读 → 日志永远打印 "new tab opened: 空"，是**假信号**，会误导排查。
+            for _ in range(6):  # 最多 12s
+                time.sleep(2)
+                cur = next((x for x in list_tabs() if x["id"] == ntab), None)
+                tab_url = (cur or {}).get("url") or ""
+                if "/search" in tab_url:
+                    break
+            print(f"  new tab: {tab_url[:120] if tab_url else '(未加载 /search)'}")
             print("  保留新 tab，回 dashboard 轮询计分（最长 90s）...")
         else:
             print("  ! 未捕获新 tab，等待补偿")
@@ -440,11 +468,6 @@ def main():
     if done_n >= 3:
         print(f"\nDONE  ✅ Daily Set {done_n}/{total_n} 全部完成")
         return 0
-    if broken:
-        print(f"\nBLOCKED  ⚠ Daily Set {done_n}/{total_n}；{len(broken)} 个活动链接异常，无法完成（微软侧数据问题）")
-        for b in broken:
-            print(f"         · {b}")
-        return 5
     print(f"\nINCOMPLETE  ⚠ Daily Set 仅 {done_n}/{total_n} 完成 —— 稍后可重跑本脚本补做")
     return 4
 
