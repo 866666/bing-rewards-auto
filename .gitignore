@@ -18,6 +18,8 @@ logs/
 # ===== Python =====
 __pycache__/
 *.pyc
+# 项目自带解释器（隔离环境，不入库；重建方法见 tools/repoint_task_python.py 尾部提示）
+.venv/
 
 # ===== 历史一次性/探测脚本（含本机旧路径，不入库）=====
 archive/

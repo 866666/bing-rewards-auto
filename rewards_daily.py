@@ -458,6 +458,24 @@ def main():
     p(f"Clash 切换: {'on' if args.with_clash else 'off（直连，实测可计分）'}")
     p("")
 
+    # 0) 依赖自检
+    # 2026-10-08 加：WorkBuddy 更新时会重建它自带的 vendor python 目录，把第三方包清空
+    #（当日 3.13.12 被改成指向 vendor python 的符号链接，requests/websocket 全没了）。
+    # 旧版只在连 CDP 时抛 "No module named 'websocket'"，把真实原因藏得很深。
+    p(f"[0/4] 解释器: {sys.executable}")
+    _missing = []
+    for _mod, _pkg in (("requests", "requests"), ("websocket", "websocket-client")):
+        try:
+            __import__(_mod)
+        except Exception:
+            _missing.append(_pkg)
+    if _missing:
+        p(f"  ❌ 缺少依赖: {', '.join(_missing)}")
+        p(f"     修复: \"{sys.executable}\" -m pip install {' '.join(_missing)}")
+        p("     ⚠ 应使用项目自带解释器（不随 WorkBuddy 更新被清空）: <项目>\\.venv\\Scripts\\pythonw.exe")
+        return
+    p("  ✅ 依赖自检通过（requests / websocket-client）")
+
     # 1) 切 Clash（可选）
     if args.with_clash:
         p("[1/4] 切换 Clash 到美国节点...")
