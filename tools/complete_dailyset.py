@@ -398,7 +398,7 @@ def do_one_task(ws, i, total, t):
         # 提示（**不跳过**）：链接缺常见归属参数时，若本轮不计分多半是微软侧数据异常，
         # 而不是我们点得不对 —— 2026-09-14 实测：这类活动手动点仍可完成，故照常点击。
         if not offer_attributed(t.get("destination", "")):
-            print("  ℹ 链接未带常见奖励归属参数（BTEPOKey / PUBL=RewardsDO）；若不计分多为微软侧数据异常，可稍后重跑")
+            print("  ℹ 该链接未带常见奖励归属参数（BTEPOKey / PUBL=RewardsDO）——仅供参考，非故障判据")
         # 2026-10-09：实测「点了但没捕获到新 tab」会白等 90s 且必然不计分
         #（当日第 1 个任务成功、后两个都栽在这），故失败后再补点一次。
         fixed_url = ""
