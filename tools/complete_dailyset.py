@@ -293,16 +293,21 @@ def find_task_anchor(ws, title, destination="", timeout=25):
         const i = pickIdx(anchors, marker, kwTitle);
         if (i >= 0) {
           const a = anchors[i];
-          const fixed = fixHref(a);          // 先修 href，再取坐标，再交给 CDP 真点
           a.scrollIntoView({block: 'center', inline: 'center'});
           await new Promise(r => setTimeout(r, 250));
+          // ⚠ 2026-10-09 关键顺序：**先量坐标、后改 href**。
+          // setAttribute 修改 href 可能触发 React 重渲染并替换 DOM 节点；若先改后量，
+          // 量到的是"已脱离文档"的旧节点 → rect 全 0 → 鼠标事件被派发到 (0,0)，
+          // 等于点在页面左上角 = 什么都没点到（静默失败，日志只看到"点了但没打开 tab"）。
           const r = a.getBoundingClientRect();
-          if (r.width === 0 || r.height === 0) { window.scrollBy(0, 300); await new Promise(r2 => setTimeout(r2, 400)); }
-          const r2 = a.getBoundingClientRect();
-          return JSON.stringify({idx: [...document.querySelectorAll(SEL)].indexOf(a),
-                                 x: Math.round(r2.left + r2.width / 2),
-                                 y: Math.round(r2.top + r2.height / 2),
-                                 fixed: fixed || ''});
+          const x = Math.round(r.left + r.width / 2);
+          const y = Math.round(r.top + r.height / 2);
+          const idx2 = [...document.querySelectorAll(SEL)].indexOf(a);
+          const fixed = fixHref(a);       // 量完坐标再改 href
+          if (!a.isConnected || r.width === 0 || r.height === 0 || (x <= 0 && y <= 0)) {
+            return 'BAD_RECT:' + JSON.stringify({x: x, y: y, w: r.width, h: r.height, connected: a.isConnected});
+          }
+          return JSON.stringify({idx: idx2 >= 0 ? idx2 : i, x: x, y: y, fixed: fixed || ''});
         }
         window.scrollBy(0, 500);  // 触发懒加载
         await new Promise(r => setTimeout(r, 800));
@@ -313,7 +318,14 @@ def find_task_anchor(ws, title, destination="", timeout=25):
             .replace("__KW__", json.dumps(kw_title))
             .replace("__FIXJS__", fix_href_js)
             .replace("__TIMEOUT__", str(timeout)))
-    r = cdp_js(ws, js, timeout=timeout + 10, await_promise=True)
+    try:
+        r = cdp_js(ws, js, timeout=timeout + 10, await_promise=True)
+    except Exception as e:
+        # ⚠ 2026-10-09 实锤：rewards.bing.com 不可达时，页面里的**同步 XHR 会挂住渲染进程**，
+        # 于是 Runtime.evaluate 永远不返回 → TimeoutError。这一条曾把整轮补做直接打断，
+        # 后两个任务连点都没点。此处降级为"跳过该任务"，不让单个超时毁掉整轮。
+        print(f"  ! 定位卡片失败/超时（{type(e).__name__}）——疑似页面卡住（网络不通），跳过该任务")
+        return "CDP_ERR"
 
     if not (isinstance(r, str) and r.startswith("{")):
         return r if r else "NO_ANCHOR:" + marker  # NO_ANCHOR:... 原样返回
@@ -332,27 +344,140 @@ def find_task_anchor(ws, title, destination="", timeout=25):
           if (!a) return 'NO_ANCHOR2';
           a.click(); return 'JS_CLICK';
         })()""".replace("__IDX__", str(info["idx"]))
-        tag = cdp_js(ws, js_click, timeout=15) or "NO_ANCHOR2"
+        try:
+            tag = cdp_js(ws, js_click, timeout=15) or "NO_ANCHOR2"
+        except Exception as e:
+            print(f"  ! 回退点击失败（{type(e).__name__}）")
+            tag = "CDP_ERR"
     if info.get("fixed"):
         return f"{tag}|{info['fixed']}"
     return tag
 
 
-def wait_for_new_tab(before_ids, max_wait=12):
-    """点击后等待新开的搜索 tab 出现，返回 (ws, tab_id)"""
+def _try_ws(tab):
+    try:
+        import websocket
+        return websocket.create_connection(tab["webSocketDebuggerUrl"], timeout=60, suppress_origin=True)
+    except Exception:
+        return None
+
+
+def wait_for_new_tab(before_ids, max_wait=15):
+    """点击后等待新开的搜索 tab，返回 (ws|None, tab_id|None)。
+
+    ⚠ 2026-10-09 修正（重要）：旧版把"能建立 CDP websocket"当作"找到了 tab"的前提，
+    而连接一失败就 `continue` **重扫同一份列表** → 轮次被空转耗尽，返回 (None, None)，
+    日志表现为「点了但没捕获到新 tab」。
+    A/B 实测证明这是**检测端的假否**：同一张卡的三种点击方式（转义 href+真点 / 原始 href+真点 /
+    转义 href+el.click()）**都能打开 /search 页**。
+    现改为：只看 tab 列表（优先 url 含 /search），websocket 仅作"附加产物"（失败就返回 None，
+    调用方本来也只是立刻 close 它）。
+    """
+    fallback = None
     for _ in range(max_wait):
-        tabs = list_tabs()
-        for t in tabs:
-            if t["id"] not in before_ids:
-                try:
-                    import websocket
-                    w = websocket.create_connection(t["webSocketDebuggerUrl"], timeout=60, suppress_origin=True)
-                    return w, t["id"]
-                except Exception as e:
-                    time.sleep(1)
-                    continue
+        for t in list_tabs():
+            if t["id"] in before_ids:
+                continue
+            if "/search" in (t.get("url") or ""):
+                return _try_ws(t), t["id"]
+            if fallback is None:
+                fallback = t          # 还没拿到 url 的新 tab，先记下
         time.sleep(1)
+    if fallback:
+        return _try_ws(fallback), fallback["id"]
     return None, None
+
+
+def do_one_task(ws, i, total, t):
+    """处理单个 Daily Set 任务。
+    2026-10-09：整体包 try/except —— 网络不通时页面会卡住、CDP 调用会超时，
+    旧版一次 TimeoutError 就把整轮补做打断（后面任务连点都没点）。现在单任务失败只跳过它。"""
+    try:
+        title = t["title"]
+        print(f"\n[{i}/{total}] {title}  type={t['type']}")
+        # 提示（**不跳过**）：链接缺常见归属参数时，若本轮不计分多半是微软侧数据异常，
+        # 而不是我们点得不对 —— 2026-09-14 实测：这类活动手动点仍可完成，故照常点击。
+        if not offer_attributed(t.get("destination", "")):
+            print("  ℹ 链接未带常见奖励归属参数（BTEPOKey / PUBL=RewardsDO）；若不计分多为微软侧数据异常，可稍后重跑")
+        # 2026-10-09：实测「点了但没捕获到新 tab」会白等 90s 且必然不计分
+        #（当日第 1 个任务成功、后两个都栽在这），故失败后再补点一次。
+        fixed_url = ""
+        nws = ntab = None
+        for attempt in (1, 2):
+            before = {x["id"] for x in list_tabs()}
+            r = find_task_anchor(ws, title, t.get("destination", ""))
+            print(f"  click{'' if attempt == 1 else '(重试)'}: {str(r)[:170]}")
+            if str(r).startswith("NO_ANCHOR"):
+                print("  ! 找不到卡片锚点，跳过")
+                return
+            if str(r).startswith("CDP_ERR"):
+                print("  ! 页面/通道异常，跳过该任务")
+                return
+            if str(r).startswith("BAD_RECT"):
+                # 节点已脱离文档 / 尺寸为 0：坐标不可信，绝不能在 (0,0) 盲点（那是静默失败）
+                print(f"  ! 卡片坐标异常，不作点击: {str(r)[:90]}")
+                if attempt == 2:
+                    print("  ! 连续两次坐标异常，跳过该任务")
+                    return
+                time.sleep(2)
+                continue
+            # 若卡片 href 是畸形 URL（裸引号），find_task_anchor 会返回转义后的 URL 供兜底
+            if "|" in str(r):
+                fixed_url = str(r).split("|", 1)[1].strip()
+            nws, ntab = wait_for_new_tab(before)
+            if ntab:
+                break
+            if attempt == 1:
+                print("  ! 未捕获新 tab，3s 后重试点击...")
+                time.sleep(3)
+        if not ntab:
+            print("  ! 两次点击都未捕获新 tab，等待补偿")
+            time.sleep(WAIT_PER_TASK)
+        tab_url = ""
+        if ntab:
+            if nws:
+                nws.close()  # 只断开 CDP 连接，保留浏览器 tab 让 tracking 跑完
+            # ⚠ 延迟轮询：/json/list 里刚出现的 tab，url 字段常常还是空串（导航未提交）。
+            # 旧版立刻读 → 日志永远打印 "new tab opened: 空"，是**假信号**，会误导排查。
+            for _ in range(6):  # 最多 12s
+                time.sleep(2)
+                cur = next((x for x in list_tabs() if x["id"] == ntab), None)
+                tab_url = (cur or {}).get("url") or ""
+                if "/search" in tab_url:
+                    break
+            print(f"  new tab: {tab_url[:120] if tab_url else '(未加载 /search)'}")
+            print("  保留新 tab，回 dashboard 轮询计分（最长 90s）...")
+        # 兜底（2026-09-14）：畸形 href 被转义后，若新 tab 仍未真正加载搜索页
+        #（URL 为空 / about:blank / 不在 /search），直接用转义后的 URL 新开一个 tab。
+        if fixed_url and ("/search" not in tab_url):
+            print(f"  ↻ 新 tab 未加载搜索页，改用转义 URL 直开: {fixed_url[:110]}")
+            cdp_new_page(fixed_url)
+            time.sleep(WAIT_PER_TASK)
+        # 回 dashboard 并轮询该任务是否完成
+        try:
+            cdp_nav(ws, "https://rewards.bing.com/dashboard", 8)
+        except Exception as e:
+            print(f"  ! 回 dashboard 失败（{type(e).__name__}）")
+        time.sleep(8)
+        done = False
+        for _ in range(5):  # 5×15s = 75s + 基线 ≈ 90s
+            time.sleep(15)
+            try:
+                s1 = read_state(ws)
+            except Exception:
+                s1 = None
+            if s1:
+                tt = [x for x in s1.get("tasks") or [] if x.get("title") == title]
+                if tt and tt[0].get("complete"):
+                    done = True
+                    print("  ✅ 计分已生效")
+                    break
+        if not done:
+            print("  ⏳ 90s 内未观察到 complete=true（可能是网络/计分延迟，也可能是任务今日确实不计奖励）")
+        if ntab:
+            close_tab(ntab)
+    except Exception as e:
+        print(f"  ! 该任务处理异常（{type(e).__name__}: {e}），继续下一个")
 
 
 def main():
@@ -386,67 +511,14 @@ def main():
         return 0
 
     for i, t in enumerate(todo, 1):
-        title = t["title"]
-        print(f"\n[{i}/{len(todo)}] {title}  type={t['type']}")
-        # 提示（**不跳过**）：链接缺常见归属参数时，若本轮不计分多半是微软侧数据异常，
-        # 而不是我们点得不对 —— 2026-09-14 实测：这类活动手动点仍可完成，故照常点击。
-        if not offer_attributed(t.get("destination", "")):
-            print("  ℹ 链接未带常见奖励归属参数（BTEPOKey / PUBL=RewardsDO）；若不计分多为微软侧数据异常，可稍后重跑")
-        before = {x["id"] for x in list_tabs()}
-        r = find_task_anchor(ws, title, t.get("destination", ""))
-        print(f"  click: {str(r)[:170]}")
-        if str(r).startswith("NO_ANCHOR"):
-            print("  ! 找不到卡片锚点，跳过")
-            continue
-        # 若卡片 href 是畸形 URL（裸引号），find_task_anchor 会返回转义后的 URL 供兜底
-        fixed_url = str(r).split("|", 1)[1].strip() if "|" in str(r) else ""
-        nws, ntab = wait_for_new_tab(before)
-        tab_url = ""
-        if nws and ntab:
-            nws.close()  # 只断开 CDP 连接，保留浏览器 tab 让 tracking 跑完
-            # ⚠ 延迟轮询：/json/list 里刚出现的 tab，url 字段常常还是空串（导航未提交）。
-            # 旧版立刻读 → 日志永远打印 "new tab opened: 空"，是**假信号**，会误导排查。
-            for _ in range(6):  # 最多 12s
-                time.sleep(2)
-                cur = next((x for x in list_tabs() if x["id"] == ntab), None)
-                tab_url = (cur or {}).get("url") or ""
-                if "/search" in tab_url:
-                    break
-            print(f"  new tab: {tab_url[:120] if tab_url else '(未加载 /search)'}")
-            print("  保留新 tab，回 dashboard 轮询计分（最长 90s）...")
-        else:
-            print("  ! 未捕获新 tab，等待补偿")
-            time.sleep(WAIT_PER_TASK)
-        # 兜底（2026-09-14）：畸形 href 被转义后，若新 tab 仍未真正加载搜索页
-        #（URL 为空 / about:blank / 不在 /search），直接用转义后的 URL 新开一个 tab。
-        if fixed_url and ("/search" not in tab_url):
-            print(f"  ↻ 新 tab 未加载搜索页，改用转义 URL 直开: {fixed_url[:110]}")
-            cdp_new_page(fixed_url)
-            time.sleep(WAIT_PER_TASK)
-        # 回 dashboard 并轮询该任务是否完成
-        cdp_nav(ws, "https://rewards.bing.com/dashboard", 8)
-        time.sleep(8)
-        done = False
-        for _ in range(5):  # 5×15s = 75s + 基线 ≈ 90s
-            time.sleep(15)
-            try:
-                s1 = read_state(ws)
-            except Exception:
-                s1 = None
-            if s1:
-                tt = [x for x in s1.get("tasks") or [] if x.get("title") == title]
-                if tt and tt[0].get("complete"):
-                    done = True
-                    print("  ✅ 计分已生效")
-                    break
-        if not done:
-            print("  ⏳ 90s 内未观察到 complete=true（可能是网络/计分延迟，也可能是任务今日确实不计奖励）")
-        if ntab:
-            close_tab(ntab)
+        do_one_task(ws, i, len(todo), t)
 
     print(f"\n== waiting {WAIT_SETTLE}s for credits to land ==")
     time.sleep(WAIT_SETTLE)
-    cdp_nav(ws, "https://rewards.bing.com/dashboard", 12)  # 回 rewards 域，避免 XHR 跨域失败
+    try:
+        cdp_nav(ws, "https://rewards.bing.com/dashboard", 12)  # 回 rewards 域，避免 XHR 跨域失败
+    except Exception as e:
+        print(f"  ! 最终回 dashboard 失败（{type(e).__name__}）")
     s1 = read_state(ws)
     print("after    :", json.dumps(s1, ensure_ascii=False) if s1 else "n/a")
     if s0 and s1:

@@ -555,6 +555,9 @@ def main():
         # → 每轮结束检查未完成数，有剩余再跑一轮（最多 3 轮），显著提升 3/3 达成率
         # 2026-09-12 起：严格区分「API 不可达」与「确实完成」。读不到状态一律按未完成处理并明确告警，
         # 绝不因 API 波动谎报成功（旧版曾打印"已完成"却实际 0/3，用户只能手动补点）。
+        # 2026-10-09 起：连续 2 轮"未验证"（API 不可达）即停止补跑 —— 网络不通时多跑纯属白等
+        #（当日曾 3 轮全废、白耗十几分钟），留给稍后重跑或手动补做。
+        unverified = 0
         for rnd in range(1, 4):
             try:
                 r = subprocess.run([py, ds_script], capture_output=True, text=True,
@@ -580,8 +583,14 @@ def main():
                     break
                 time.sleep(10)
             if not sobj:
-                p("    ⚠ 积分 API 不可达，无法验证 Daily Set 完成情况（按未完成处理）")
-                break
+                unverified += 1
+                p(f"    ⚠ 积分 API 不可达，无法验证 Daily Set 完成情况（按未完成处理）")
+                if unverified >= 2:
+                    p("    ⚠ 连续 2 轮读不到状态 —— 停止补跑（网络不通时多跑无意义，稍后重跑即可）")
+                    break
+                time.sleep(20)
+                continue
+            unverified = 0
             left = int((sobj.get("dailySetComplete") or "0/3").split("/")[0])
             dailyset_ok = (left >= 3)
             if left >= 3:
