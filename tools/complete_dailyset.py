@@ -287,6 +287,7 @@ def find_task_anchor(ws, title, destination="", timeout=25):
       const kwTitle = __KW__;
       const deadline = __TIMEOUT__ * 1000;
       const t0 = Date.now();
+      let sawZero = false;          // 是否"找到了卡但尺寸一直是 0"（区别于真的找不到）
       __FIXJS__
       while (Date.now() - t0 < deadline) {
         const anchors = [...document.querySelectorAll(SEL)];
@@ -298,21 +299,27 @@ def find_task_anchor(ws, title, destination="", timeout=25):
           // ⚠ 2026-10-09 关键顺序：**先量坐标、后改 href**。
           // setAttribute 修改 href 可能触发 React 重渲染并替换 DOM 节点；若先改后量，
           // 量到的是"已脱离文档"的旧节点 → rect 全 0 → 鼠标事件被派发到 (0,0)，
-          // 等于点在页面左上角 = 什么都没点到（静默失败，日志只看到"点了但没打开 tab"）。
+          // 等于点在页面左上角 = 什么都没点到（静默失败）。
           const r = a.getBoundingClientRect();
           const x = Math.round(r.left + r.width / 2);
           const y = Math.round(r.top + r.height / 2);
           const idx2 = [...document.querySelectorAll(SEL)].indexOf(a);
-          const fixed = fixHref(a);       // 量完坐标再改 href
-          if (!a.isConnected || r.width === 0 || r.height === 0 || (x <= 0 && y <= 0)) {
-            return 'BAD_RECT:' + JSON.stringify({x: x, y: y, w: r.width, h: r.height, connected: a.isConnected});
+          if (a.isConnected && r.width > 0 && r.height > 0 && (x > 0 || y > 0)) {
+            const fixed = fixHref(a);       // 量完坐标再改 href
+            return JSON.stringify({idx: idx2 >= 0 ? idx2 : i, x: x, y: y, fixed: fixed || ''});
           }
-          return JSON.stringify({idx: idx2 >= 0 ? idx2 : i, x: x, y: y, fixed: fixed || ''});
+          // ⚠ 2026-10-29：尺寸为 0 多为「卡片尚未完成布局」（懒加载/骨架屏/SPA 还没渲染完），
+          // 而不是节点坏了 —— 实测稍等片刻同一张卡就是 348×126 的正常尺寸。
+          // 所以这里**不要立刻放弃**，滚动一下再重试，直到守候期用完。
+          window.scrollBy(0, 120);
+          sawZero = true;
+          await new Promise(r2 => setTimeout(r2, 600));
+          continue;
         }
         window.scrollBy(0, 500);  // 触发懒加载
         await new Promise(r => setTimeout(r, 800));
       }
-      return 'NO_ANCHOR:' + marker;
+      return sawZero ? 'BAD_RECT_AFTER_TIMEOUT' : ('NO_ANCHOR:' + marker);
     })()"""
     js = (js.replace("__MARKER__", json.dumps(marker))
             .replace("__KW__", json.dumps(kw_title))

@@ -286,7 +286,10 @@ def get_points_and_state(ws):
             raise RuntimeError("getuserinfo 返回空")
         if v.startswith("API_ERR:") or v.startswith("JS_EXC:"):
             API_BLOCKED = True
-            p(f"  ⚠ 积分 API 不可用（{v}）：微软对中国区直连封锁 rewards API，改为只执行搜索")
+            # 2026-10-29 更正：不要再断言"微软对中国区封锁" —— 实测多为**瞬时网络不可达**
+            #（当天 08:30 整场读不到，但搜索积分 later 仍到账；16:52 复跑读取完全正常）。
+            p(f"  ⚠ 积分 API 本次读不到（{v}）——多为网络波动/瞬时不可达，不是区域封锁")
+            p("     搜索继续执行；计分可能延迟到账，稍后可用 tools/complete_dailyset.py 或重跑核对")
             return None
         API_BLOCKED = False
         return v
@@ -617,9 +620,9 @@ def main():
             delta = d1.get("points", 0) - d0.get("points", 0)
             p(f"\n  📊 积分变化: {d0.get('points')} → {d1.get('points')} (+{delta} 分)")
         else:
-            p("\n  ⚠ 积分报告跳过：微软 8/28 后对中国区直连封锁 rewards API（getuserinfo 404）")
-            p("    搜索已正常执行（8/27 实测直连搜索仍计分）。")
-            p("    如需核对积分增量，带 --with-clash 挂美国节点再跑一次。")
+            p("\n  ⚠ 积分报告跳过：本次读不到积分 API（网络波动），无法给出增量")
+            p("    搜索已执行；积分**可能延迟到账**（2026-10-29 实测：08:30 读不到、16:52 读到")
+            p("    且当日搜索积分已补记）。可稍后重跑本脚本或 tools/complete_dailyset.py 核对。")
     except Exception as e:
         p(f"  ⚠ 积分解析失败: {e}")
 
