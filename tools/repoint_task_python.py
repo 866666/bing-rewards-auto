@@ -36,7 +36,11 @@ ap = argparse.ArgumentParser()
 ap.add_argument("--task", default=TASK_NAME)
 ap.add_argument("--python", default=DEFAULT_PY, help=f"解释器路径（默认 {DEFAULT_PY}）")
 ap.add_argument("--show", action="store_true", help="只显示当前 Action")
+ap.add_argument("--script", default=SCRIPT, help="要运行的脚本（默认 rewards_daily.py）")
+ap.add_argument("--prefix", default="", help="放在脚本路径前的启动器参数，如 -3")
 args = ap.parse_args()
+
+WANT_ARGS = ((args.prefix + " ") if args.prefix else "") + '"' + args.script + '"'
 
 sched = win32com.client.Dispatch("Schedule.Service")
 sched.Connect()
@@ -63,7 +67,7 @@ dump(td, "修改前")
 td.Actions.Clear()
 act = td.Actions.Create(0)  # 0 = TASK_ACTION_EXEC
 act.Path = args.python
-act.Arguments = '"' + SCRIPT + '"'
+act.Arguments = WANT_ARGS
 act.WorkingDirectory = str(BASE_DIR)
 
 # 6 = TASK_CREATE_OR_UPDATE, 3 = TASK_LOGON_INTERACTIVE_TOKEN（与既有任务一致）
@@ -73,11 +77,11 @@ check = folder.GetTask(args.task).Definition
 dump(check, "修改后")
 
 a = check.Actions.Item(1)
-ok = (a.Path == args.python) and (a.Arguments == '"' + SCRIPT + '"')
+ok = (a.Path == args.python) and (a.Arguments == WANT_ARGS)
 print("\nVERIFY:", "PASS ✅" if ok else "FAIL ❌")
 print("解释器是否存在:", Path(args.python).exists())
 if not Path(args.python).exists():
     print("  ⚠ 解释器文件不存在！先创建 venv：")
-    print(f'     "C:\\Program Files\\Python314\\python.exe" -m venv "{BASE_DIR}\\.venv"')
+    print(f'     "C:\\Program Files\\Python315\\python.exe" -m venv "{BASE_DIR}\\.venv"')
     print(f'     "{BASE_DIR}\\.venv\\Scripts\\python.exe" -m pip install requests websocket-client pywin32 psutil')
 sys.exit(0 if ok else 1)
