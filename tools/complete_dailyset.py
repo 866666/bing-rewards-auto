@@ -411,6 +411,15 @@ def do_one_task(ws, i, total, t):
         fixed_url = ""
         nws = ntab = None
         for attempt in (1, 2):
+            if attempt == 2:
+                # ⚠ 2026-11-09：第一次失败常见原因是**页面假死**（同步 XHR 挂住渲染进程
+                # → rect 一直 0 / Runtime.evaluate 超时）。在卡死的页面上原地重试往往没用，
+                # 先重新加载 dashboard 再试，实测能恢复（当日「多彩的适应」重跑一次即点中）。
+                try:
+                    cdp_nav(ws, "https://rewards.bing.com/dashboard", 10)
+                except Exception as e:
+                    print(f"  ! 重试前刷新页面失败（{type(e).__name__}）")
+                time.sleep(2)
             before = {x["id"] for x in list_tabs()}
             r = find_task_anchor(ws, title, t.get("destination", ""))
             print(f"  click{'' if attempt == 1 else '(重试)'}: {str(r)[:170]}")
