@@ -48,10 +48,17 @@ def log(msg):
 
 
 def run(cmd, timeout=300):
-    """静默执行，返回 (returncode, 合并输出)"""
+    """静默执行，返回 (returncode, 合并输出)
+
+    ⚠ 2026-11-09：必须带 CREATE_NO_WINDOW。本脚本由 pyw（GUI 子系统）启动，本身无控制台，
+    但 `python.exe` 是**控制台子系统**程序 —— 不加这个标志，Windows 会给它单开一个
+    **空白终端窗口**（输出被管道 capture 走了，所以窗口里什么都没有）。
+    实测用户会看到"经常弹出一个终端窗口、什么也没显示"：就是 venv 自检那一步。
+    """
     try:
         r = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8",
-                           errors="replace", timeout=timeout, cwd=str(BASE_DIR))
+                           errors="replace", timeout=timeout, cwd=str(BASE_DIR),
+                           creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
         return r.returncode, ((r.stdout or "") + (r.stderr or "")).strip()
     except Exception as e:
         return -1, f"{type(e).__name__}: {e}"

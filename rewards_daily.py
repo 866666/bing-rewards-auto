@@ -377,7 +377,8 @@ def setup_wizard():
     usable = []
     for py in interpreters:
         try:
-            subprocess.run([py, "-c", "import win32com.client"], capture_output=True, timeout=20, check=True)
+            subprocess.run([py, "-c", "import win32com.client"], capture_output=True, timeout=20, check=True,
+                           creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
             usable.append(py)
         except Exception:
             continue
@@ -386,7 +387,8 @@ def setup_wizard():
     for py in usable:
         try:
             r = subprocess.run([py, reg_script, "--time", t, "--task", cfg["task_name"]],
-                               capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=60)
+                               capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=60,
+                               creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
             out = (r.stdout or "") + (r.stderr or "")
             print(out[-800:])
             if "ALL CHECKS PASSED" in out:
@@ -409,7 +411,8 @@ def setup_wizard():
     pyw = os.path.join(os.path.dirname(os.path.abspath(sys.executable)), "pythonw.exe")
     if os.path.exists(pyw):
         try:
-            r = subprocess.run(["setx", "BING_REWARDS_PYTHON", pyw], capture_output=True, timeout=15)
+            r = subprocess.run(["setx", "BING_REWARDS_PYTHON", pyw], capture_output=True, timeout=15,
+                               creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
             if r.returncode == 0:
                 print(f"  ✅ 已写入用户环境变量 BING_REWARDS_PYTHON = {pyw}")
             else:
@@ -563,8 +566,11 @@ def main():
         unverified = 0
         for rnd in range(1, 4):
             try:
+                # ⚠ 2026-11-09：py 是"控制台版" python.exe，若不加 CREATE_NO_WINDOW，
+                # Windows 会给它开一个**空白终端窗口**并停到本轮结束（输出被 capture 走了，所以什么都没显示）。
                 r = subprocess.run([py, ds_script], capture_output=True, text=True,
-                                   encoding="utf-8", errors="replace", timeout=420)
+                                   encoding="utf-8", errors="replace", timeout=420,
+                                   creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
                 out = ((r.stdout or "") + (r.stderr or "")).strip()
                 verdict = next((l.strip() for l in reversed(out.splitlines())
                                 if l.strip().startswith(("DONE", "INCOMPLETE", "UNVERIFIED"))), "")
