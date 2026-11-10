@@ -214,6 +214,86 @@ def offer_attributed(destination):
     return bool(destination) and any(m in destination for m in ATTR_MARKERS)
 
 
+def js_click_index(ws, idx):
+    """按索引直接派发 click —— **不需要坐标**。
+    用于卡片尺寸恒为 0（页面布局异常）时兜底：坐标法完全失效，但 click 仍能触发导航。
+    2026-10-09 A/B 实测：el.click() 同样能把 /search 页打开。"""
+    js = """(() => {
+      const a = [...document.querySelectorAll('a[target=_blank][href*="bing.com"]')][__IDX__];
+      if (!a) return 'NO_ANCHOR2';
+      const raw = a.getAttribute('href') || '';
+      if (/["<>`\\s]/.test(raw)) {
+        a.setAttribute('href', raw.replace(/"/g,'%22').replace(/</g,'%3C')
+                                .replace(/>/g,'%3E').replace(/`/g,'%60').replace(/\\s/g,'%20'));
+      }
+      a.click();
+      return 'JS_CLICK';
+    })()""".replace("__IDX__", str(int(idx)))
+    return cdp_js(ws, js, timeout=15)
+
+
+def wait_cards_ready(ws, timeout=40, need=3):
+    """等到 dashboard 的锚点**全部完成布局**。
+    2026-11-10 实锤：只等"至少 1 张有尺寸"太宽松 —— 页面常处于**半渲染**状态
+    （实测 6 个锚点里只有 2 个有尺寸，其余 rect 仍是 0），此时点第 2/3 张卡必然
+    返回 BAD_RECT|…，而同一张卡在"全部就绪"时（就绪数 6）用真实鼠标点击一次就中。
+    故判据改为：sized == total 立即就绪；否则等 sized 连续 3 次不变且 >= need 才算稳定。
+    返回最终就绪数量。"""
+    sized = total = 0
+    last = -1
+    stable = 0
+    t0 = time.time()
+    while time.time() - t0 < timeout:
+        o = None
+        try:
+            v = cdp_js(ws, """(() => {
+              const SEL = 'a[target=_blank][href*="bing.com"]';
+              const a = [...document.querySelectorAll(SEL)];
+              let s = 0;
+              for (const e of a) {
+                const r = e.getBoundingClientRect();
+                if (r.width > 5 && r.height > 5) s++;
+              }
+              return JSON.stringify({t: a.length, s: s, ready: document.readyState});
+            })()""", timeout=10)
+            if isinstance(v, str) and v.startswith("{"):
+                o = json.loads(v)
+        except Exception:
+            o = None
+        if o:
+            total, sized = o.get("t", 0), o.get("s", 0)
+            if sized >= need and sized >= total:
+                return sized                     # 全部布局完成
+            if sized == last:
+                stable += 1
+            else:
+                stable = 0
+                last = sized
+            if stable >= 3 and sized >= need:
+                return sized                     # 稳定但未全覆盖（可能有隐藏锚点）
+        time.sleep(0.8)
+    return sized
+
+
+def goto_dashboard(ws, min_wait=10, card_timeout=40, reloads=1, need=3):
+    """导航到 dashboard，并等到锚点**整体布局就绪**；未就绪则重载重试。
+    返回就绪锚点数（< need 表示页面始终没渲染完整，调用方应走 JS 点击兜底）。"""
+    n = 0
+    for i in range(reloads + 1):
+        try:
+            cdp_send(ws, "Page.enable")
+            # 让标签页进入前台：后台标签页有时不参与布局
+            cdp_send(ws, "Page.bringToFront", timeout=10)
+        except Exception:
+            pass
+        cdp_nav(ws, "https://rewards.bing.com/dashboard", min_wait)
+        n = wait_cards_ready(ws, timeout=card_timeout, need=need)
+        print(f"  dashboard 就绪锚点: {n}" + ("" if n >= need else f"  ← 未达 {need}，重载一次"))
+        if n >= need:
+            return n
+    return n
+
+
 def task_marker(destination, title):
     """从 destination 提取稳定标识用于 href 匹配（比 innerText 匹配可靠）。
     优先取 ?q= 参数（URL 解码），回退 path/query 片段。"""
@@ -288,6 +368,7 @@ def find_task_anchor(ws, title, destination="", timeout=25):
       const deadline = __TIMEOUT__ * 1000;
       const t0 = Date.now();
       let sawZero = false;          // 是否"找到了卡但尺寸一直是 0"（区别于真的找不到）
+      let lastIdx = -1;             // 尺寸为 0 时也记住索引，供 JS 点击回退使用
       __FIXJS__
       while (Date.now() - t0 < deadline) {
         const anchors = [...document.querySelectorAll(SEL)];
@@ -304,13 +385,12 @@ def find_task_anchor(ws, title, destination="", timeout=25):
           const x = Math.round(r.left + r.width / 2);
           const y = Math.round(r.top + r.height / 2);
           const idx2 = [...document.querySelectorAll(SEL)].indexOf(a);
+          lastIdx = idx2 >= 0 ? idx2 : i;
           if (a.isConnected && r.width > 0 && r.height > 0 && (x > 0 || y > 0)) {
             const fixed = fixHref(a);       // 量完坐标再改 href
-            return JSON.stringify({idx: idx2 >= 0 ? idx2 : i, x: x, y: y, fixed: fixed || ''});
+            return JSON.stringify({idx: lastIdx, x: x, y: y, fixed: fixed || ''});
           }
-          // ⚠ 2026-10-29：尺寸为 0 多为「卡片尚未完成布局」（懒加载/骨架屏/SPA 还没渲染完），
-          // 而不是节点坏了 —— 实测稍等片刻同一张卡就是 348×126 的正常尺寸。
-          // 所以这里**不要立刻放弃**，滚动一下再重试，直到守候期用完。
+          // ⚠ 2026-10-29：尺寸为 0 多为「卡片尚未完成布局」，先滚动重试，不要立刻放弃。
           window.scrollBy(0, 120);
           sawZero = true;
           await new Promise(r2 => setTimeout(r2, 600));
@@ -319,7 +399,17 @@ def find_task_anchor(ws, title, destination="", timeout=25):
         window.scrollBy(0, 500);  // 触发懒加载
         await new Promise(r => setTimeout(r, 800));
       }
-      return sawZero ? 'BAD_RECT_AFTER_TIMEOUT' : ('NO_ANCHOR:' + marker);
+      // 尺寸始终为 0 → 带上索引返回，让调用方用「不需要坐标」的 JS 点击兜底。
+      // 同时附上当时的锚点快照（索引/尺寸/q/文本），便于事后定位"为什么选错/为什么 0 尺寸"。
+      const dump = sawZero ? JSON.stringify([...document.querySelectorAll(SEL)].map((e, i) => {
+        const r = e.getBoundingClientRect();
+        let q = '';
+        try { q = new URL(e.getAttribute('href'), location.origin).searchParams.get('q') || ''; } catch (err) {}
+        return {i: i, w: Math.round(r.width), h: Math.round(r.height),
+                q: decodeURIComponent(q).slice(0, 14),
+                t: (e.innerText || '').trim().replace(/\\s+/g, ' ').slice(0, 12)};
+      })) : '';
+      return sawZero ? ('BAD_RECT|' + lastIdx + '|' + dump) : ('NO_ANCHOR:' + marker);
     })()"""
     js = (js.replace("__MARKER__", json.dumps(marker))
             .replace("__KW__", json.dumps(kw_title))
@@ -416,7 +506,7 @@ def do_one_task(ws, i, total, t):
                 # → rect 一直 0 / Runtime.evaluate 超时）。在卡死的页面上原地重试往往没用，
                 # 先重新加载 dashboard 再试，实测能恢复（当日「多彩的适应」重跑一次即点中）。
                 try:
-                    cdp_nav(ws, "https://rewards.bing.com/dashboard", 10)
+                    goto_dashboard(ws, min_wait=8, card_timeout=20)
                 except Exception as e:
                     print(f"  ! 重试前刷新页面失败（{type(e).__name__}）")
                 time.sleep(2)
@@ -430,15 +520,29 @@ def do_one_task(ws, i, total, t):
                 print("  ! 页面/通道异常，跳过该任务")
                 return
             if str(r).startswith("BAD_RECT"):
-                # 节点已脱离文档 / 尺寸为 0：坐标不可信，绝不能在 (0,0) 盲点（那是静默失败）
-                print(f"  ! 卡片坐标异常，不作点击: {str(r)[:90]}")
-                if attempt == 2:
-                    print("  ! 连续两次坐标异常，跳过该任务")
-                    return
-                time.sleep(2)
-                continue
+                # 尺寸恒为 0（页面布局异常）→ 坐标法失效，改用**不需要坐标的 JS 点击**兜底。
+                # 2026-11-10 起：不再"跳过该任务"（那会导致 0/3），而是照点。
+                parts = str(r).split("|", 2)
+                idx = parts[1].strip() if len(parts) > 1 else ""
+                if len(parts) > 2 and parts[2].strip():
+                    print(f"  现场锚点快照: {parts[2][:700]}")
+                print(f"  ↻ 卡片尺寸为 0，坐标法失效 → 回退 JS 点击（idx={idx}）")
+                if idx.lstrip("-").isdigit():
+                    try:
+                        r = js_click_index(ws, idx)
+                    except Exception as e:
+                        r = f"CDP_ERR:{type(e).__name__}"
+                else:
+                    r = "BAD_RECT"
+                print(f"  click(回退): {str(r)[:80]}")
+                if str(r).startswith(("NO_ANCHOR", "CDP_ERR", "BAD_RECT")):
+                    if attempt == 2:
+                        print("  ! 回退点击也失败，跳过该任务")
+                        return
+                    time.sleep(2)
+                    continue
             # 若卡片 href 是畸形 URL（裸引号），find_task_anchor 会返回转义后的 URL 供兜底
-            if "|" in str(r):
+            elif "|" in str(r):
                 fixed_url = str(r).split("|", 1)[1].strip()
             nws, ntab = wait_for_new_tab(before)
             if ntab:
@@ -501,7 +605,8 @@ def main():
         print("[x] CDP unreachable")
         return 1
     ws = get_ws()
-    cdp_nav(ws, "https://rewards.bing.com/dashboard", 12)
+    # 进 dashboard 并**等卡片真正布局好**（固定 sleep 不可靠，见 wait_cards_ready 注释）
+    goto_dashboard(ws, min_wait=12, card_timeout=40)
 
     s0 = read_state(ws)
     print("baseline :", json.dumps(s0, ensure_ascii=False) if s0 else "n/a")
