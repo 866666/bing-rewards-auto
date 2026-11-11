@@ -605,20 +605,25 @@ def main():
         print("[x] CDP unreachable")
         return 1
     ws = get_ws()
-    # 进 dashboard 并**等卡片真正布局好**（固定 sleep 不可靠，见 wait_cards_ready 注释）
-    goto_dashboard(ws, min_wait=12, card_timeout=40)
+    # ⚠ 2026-11-11 顺序很重要：**先读 API，再等卡片布局**。
+    # 卡片的标题/目的地/状态全部来自 getuserinfo 这个接口；接口不通时页面**永远渲染不出卡片**
+    #（实测就绪锚点恒为 2、其余 rect 为 0），傻等 40s ×2 次重载纯属浪费。
+    # 所以先用短等待把页面带到 rewards 域，立刻读 API；不通就立刻返回 2，不再等布局。
+    cdp_nav(ws, "https://rewards.bing.com/dashboard", 8)
+    tasks = read_tasks(ws)
+    if tasks is None:
+        print("  ⚠ 无法读取 Daily Set 任务列表（rewards API 不可达）")
+        print("     卡片数据来自该接口 —— 取不到就渲染不出来，故未执行任何点击")
+        print("     按【未完成】处理；网络恢复后重跑即可（通常几小时后积分也会延迟到账）")
+        ws.close()
+        return 2
+
+    # API 正常 → 再等卡片真正布局就绪（固定 sleep 不可靠，见 wait_cards_ready 注释）
+    goto_dashboard(ws, min_wait=6, card_timeout=40)
 
     s0 = read_state(ws)
     print("baseline :", json.dumps(s0, ensure_ascii=False) if s0 else "n/a")
 
-    tasks = read_tasks(ws)
-    # ⚠ 关键修复（2026-09-12）：API 不可达 ≠ 任务已完成。
-    # 旧版把"读不到"当成"没任务可做"，于是打印"已完成"并返回 0 —— 谎报成功，用户只能手动补点。
-    if tasks is None:
-        print("  ⚠ 无法读取 Daily Set 任务列表（rewards API 不可达）")
-        print("     本轮未执行任何点击，也未能验证状态 —— 按【未完成】处理，请稍后重跑")
-        ws.close()
-        return 2
     print(f"任务列表 : {len(tasks)} 个（已完成 {sum(1 for t in tasks if t.get('complete'))} 个）")
     if not tasks:
         print("  ⚠ API 正常但今日任务列表为空（可能尚未发布或日期键不匹配），无需操作")
