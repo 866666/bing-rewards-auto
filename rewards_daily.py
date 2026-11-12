@@ -8,7 +8,9 @@ r"""Microsoft Rewards 每日积分自动化（直连版，已验证）
   [WARN] morePromotions：best-effort（UI 可见但 offer claim 机制封闭）
 
 不通过（实测）：
-  [NO] Edge 30 分钟 / Mobile App：需 Edge 持续活跃 / 手机，不在 PC 脚本范围
+  [NO] Mobile App：需手机，不在 PC 脚本范围
+  [OPT] Edge 使用 30 分钟 bonus：默认**不做**（2026-11-12 起，按用户要求任务做完即结束）；
+        仅显式 --edge-hold 时才保持 Edge 打开满 30 分钟
 
 关键更新（2026-08-27 实测）：
   [OK] 不挂代理直连也能计分！bing.com 跳 cn.bing.com 后搜索依然 +3 分/次。
@@ -23,10 +25,11 @@ r"""Microsoft Rewards 每日积分自动化（直连版，已验证）
   3. 不需要 Clash / 代理
 
 使用：
-  python rewards_daily.py                # 直连：搜索 + 报告（默认）
-  python rewards_daily.py --count 20     # 搜索次数（默认 12，可 20 次拿满 60 分）
+  python rewards_daily.py                # 搜索 + 每日活动，做完立即关浏览器退出（默认）
+  python rewards_daily.py --count 20     # 搜索次数（默认 30，当日 PC 搜索配额封顶）
   python rewards_daily.py --with-clash   # 可选：切 Clash 到美国节点再搜
   python rewards_daily.py --no-quiz      # 跳过 Quiz 尝试
+  python rewards_daily.py --edge-hold    # 可选：跑完再保持 Edge 30 分钟（Edge 使用 bonus）
 """
 import sys, io, json, time, random, urllib.request, urllib.parse, base64, argparse, subprocess, os
 # pythonw（无控制台）下 sys.stdout/stderr 为 None，直接包装会崩 → 先兜底到 devnull
@@ -439,7 +442,11 @@ def main():
     ap.add_argument("--count", type=int, default=30, help="搜索次数（默认 30 = 当日 PC 搜索配额封顶≈90 分；配额按 UTC 日=北京 08:00 重置，任务 08:30 跑可吃满当天）")
     ap.add_argument("--no-quiz", action="store_true", help="跳过 Quiz 尝试")
     ap.add_argument("--no-dailyset", action="store_true", help="跳过 Daily Set 3×10 任务")
-    ap.add_argument("--no-edge-hold", action="store_true", help="跳过 30 分钟 Edge 保活（跑完即关）")
+    ap.add_argument("--edge-hold", action="store_true",
+                    help="可选：跑完后保持 Edge 打开满 30 分钟（Edge 使用 bonus）。"
+                         "2026-11-12 起默认不等——搜索+每日活动做完即关浏览器退出")
+    # 兼容旧脚本/历史命令：保留但不产生任何效果（避免 argparse 报未知参数）
+    ap.add_argument("--no-edge-hold", action="store_true", help=argparse.SUPPRESS)
     args = ap.parse_args()
 
     # 写运行锁（含 PID），供补跑脚本判断并发；退出时清理
@@ -645,8 +652,10 @@ def main():
     cdp_shot(ws, os.path.join(BASE_DIR, "rewards_daily_done.png"))
     p(f"\n  📸 截图: rewards_daily_done.png")
 
-    # 8) Edge 保持打开 ≥30 分钟（Edge 浏览器使用 bonus 任务），期间每 5 分钟页面轻交互防挂起
-    if not args.no_edge_hold:
+    # 8) Edge 保活（**默认关闭**）
+    # 2026-11-12 用户明确要求：定时任务把搜索 + 每日活动做完就直接结束，不要再等 30 分钟。
+    # 只有显式带 --edge-hold 时才保持 Edge 打开满 30 分钟（Edge 浏览器使用 bonus）。
+    if args.edge_hold:
         hold_min = 30
         elapsed = time.time() - EDGE_STARTED_AT
         if elapsed < hold_min * 60:

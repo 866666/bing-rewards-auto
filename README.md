@@ -8,10 +8,10 @@
 |---|---|---|
 | Bing PC 搜索 ×30 | ≈90 分 | 1 次搜索 = 3 分，当天 30 次配额封顶 |
 | Daily Set ×3 | 30 分 | 从 dashboard 实点击任务卡，每天任务名/内容自动变化 |
-| Edge 浏览器使用 30 分钟 | bonus | 主流程跑完后浏览器再保持打开凑满 30 分钟，随后自动关闭 |
 | Homepage Quiz | best-effort | 尽力触发，不计分也不影响其他任务 |
+| Edge 浏览器使用 30 分钟 | 默认不做 | 2026-11-12 起按用户要求取消；仅 `--edge-hold` 时可选开启 |
 
-运行完自动关闭浏览器与脚本，不残留进程。
+运行完**立即**关闭浏览器与脚本，不残留进程、不再等 30 分钟。
 
 ## 工作原理
 
@@ -67,14 +67,14 @@ python rewards_daily.py
 python rewards_daily.py --count 30          # 指定搜索次数
 python rewards_daily.py --no-quiz           # 跳过 quiz
 python rewards_daily.py --no-dailyset       # 跳过每日活动 3 任务
-python rewards_daily.py --no-edge-hold      # 跑完立即关浏览器（不等 30 分钟）
+python rewards_daily.py --edge-hold         # 可选：跑完再保持 Edge 30 分钟（默认不等）
 ```
 
 **计划任务**（`--setup` 注册后无需任何操作）：
 
 - 每天 08:30 自动运行，日志写入项目目录 `rewards_daily_log.txt`
 - 错过触发时间（睡眠/关机）会自动补跑；电池供电也允许运行
-- 主流程结束后浏览器保持打开至满 30 分钟（Edge bonus），随后自动关闭
+- 主流程（搜索 + 每日活动）结束后**立即关闭浏览器并退出**，不再等 30 分钟
 
 **手动检查状态**：
 
