@@ -232,6 +232,32 @@ def js_click_index(ws, idx):
     return cdp_js(ws, js, timeout=15)
 
 
+def activate_page(ws):
+    """强制页面进入「可见 + 聚焦」状态，触发 Chromium 完成布局。
+
+    ⭐⭐ 2026-11-12 定稿（这是多日 BAD_RECT / 每日活动点不动的**真正总根因**）：
+    dashboard 在**后台/被遮挡的标签页**里加载时，Chromium 会跳过布局，
+    于是所有任务卡 `getBoundingClientRect()` 恒为 0×0 —— 实测 `sized 2/6`、
+    4 张内容卡全 0，`visibilityState=hidden`。此时坐标法必然 BAD_RECT，
+    索引还会错位（取到页脚「必应」），JS 回退点击能开搜索页但不计分。
+
+    A/B 实测：
+      基线                              sized 2/6  vis=hidden
+      Page.bringToFront                 sized 2/6  vis=hidden   ← 只改 focus，没用
+      Emulation.setFocusEmulation      sized 6/6  vis=visible  ← 关键
+    """
+    for method, params in (
+        ("Page.enable", {}),
+        ("Page.bringToFront", {}),
+        ("Emulation.setFocusEmulationEnabled", {"enabled": True}),
+        ("Page.setWebLifecycleState", {"state": "active"}),
+    ):
+        try:
+            cdp_send(ws, method, params, timeout=10)
+        except Exception:
+            pass
+
+
 def wait_cards_ready(ws, timeout=40, need=3):
     """等到 dashboard 的锚点**全部完成布局**。
     2026-11-10 实锤：只等"至少 1 张有尺寸"太宽松 —— 页面常处于**半渲染**状态
@@ -280,13 +306,9 @@ def goto_dashboard(ws, min_wait=10, card_timeout=40, reloads=1, need=3):
     返回就绪锚点数（< need 表示页面始终没渲染完整，调用方应走 JS 点击兜底）。"""
     n = 0
     for i in range(reloads + 1):
-        try:
-            cdp_send(ws, "Page.enable")
-            # 让标签页进入前台：后台标签页有时不参与布局
-            cdp_send(ws, "Page.bringToFront", timeout=10)
-        except Exception:
-            pass
+        activate_page(ws)          # 先让页面可见，否则布局根本不会发生，等多久都是 2/6
         cdp_nav(ws, "https://rewards.bing.com/dashboard", min_wait)
+        activate_page(ws)          # 导航后重新施加（仿真状态不保证跨导航保留）
         n = wait_cards_ready(ws, timeout=card_timeout, need=need)
         print(f"  dashboard 就绪锚点: {n}" + ("" if n >= need else f"  ← 未达 {need}，重载一次"))
         if n >= need:
@@ -605,6 +627,7 @@ def main():
         print("[x] CDP unreachable")
         return 1
     ws = get_ws()
+    activate_page(ws)
     # ⚠ 2026-11-11 顺序很重要：**先读 API，再等卡片布局**。
     # 卡片的标题/目的地/状态全部来自 getuserinfo 这个接口；接口不通时页面**永远渲染不出卡片**
     #（实测就绪锚点恒为 2、其余 rect 为 0），傻等 40s ×2 次重载纯属浪费。
